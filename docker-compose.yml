@@ -1,0 +1,49 @@
+services:
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      EVENTS: 1
+      PING: 1
+      VERSION: 1
+      INFO: 1
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker-api
+
+  semaphore:
+    # For a local build add the overlay: -f docker-compose.yml -f docker-compose.local.yml
+    image: ${SEMAPHORE_IMAGE:-ghcr.io/itsnewe/semaphore:latest}
+    restart: unless-stopped
+    depends_on:
+      - socket-proxy
+    environment:
+      DOCKER_HOST: tcp://socket-proxy:2375
+      # One or more Apprise URLs
+      APPRISE_URLS: ${APPRISE_URLS:-}
+      MIN_SEVERITY: ${MIN_SEVERITY:-High}          # critical | high | medium | low
+      ONLY_FIXED: ${ONLY_FIXED:-false}             # true = only alert when a fix exists
+      RESCAN_INTERVAL_HOURS: ${RESCAN_INTERVAL_HOURS:-24}
+      SCAN_ON_PULL: ${SCAN_ON_PULL:-false}         # also scan images pulled but not started
+      EXCLUDE_IMAGES: ${EXCLUDE_IMAGES:-}          # regex
+      NOTIFY_ON_START: ${NOTIFY_ON_START:-false}   # send a message at startup
+      TZ: ${TZ:-UTC}
+    volumes:
+      - sbom-data:/data
+      # optional Grype ignore rules, use absolute host path
+      # - /opt/semaphore/grype.yaml:/config/grype.yaml:ro
+    networks:
+      - docker-api
+      - default   # internet gateway
+
+networks:
+  docker-api:
+    internal: true
+  default:
+
+volumes:
+  sbom-data:
