@@ -25,7 +25,9 @@ services:
       DOCKER_HOST: tcp://socket-proxy:2375
       # One or more Apprise URLs
       APPRISE_URLS: ${APPRISE_URLS:-}
+      APPRISE_URLS_URGENT: ${APPRISE_URLS_URGENT:-}  # optional separate destinations for urgent alerts
       MIN_SEVERITY: ${MIN_SEVERITY:-High}          # critical | high | medium | low
+      EPSS_THRESHOLD: ${EPSS_THRESHOLD:-0.1}       # EPSS score that makes a finding urgent
       ONLY_FIXED: ${ONLY_FIXED:-false}             # true = only alert when a fix exists
       RESCAN_INTERVAL_HOURS: ${RESCAN_INTERVAL_HOURS:-24}
       SCAN_ON_PULL: ${SCAN_ON_PULL:-false}         # also scan images pulled but not started

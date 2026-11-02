@@ -23,7 +23,9 @@ def env_hours(name: str, default: float) -> float:
 class Config:
     data_dir: Path = Path("/data")
     apprise_urls: str = ""
+    apprise_urls_urgent: str = ""
     min_severity: str = "high"
+    epss_threshold: float = 0.1
     only_fixed: bool = False
     scan_on_pull: bool = False
     notify_on_start: bool = False
@@ -61,7 +63,9 @@ class Config:
         return cls(
             data_dir=Path(os.getenv("DATA_DIR", "/data")),
             apprise_urls=os.getenv("APPRISE_URLS", "").strip(),
+            apprise_urls_urgent=os.getenv("APPRISE_URLS_URGENT", "").strip(),
             min_severity=os.getenv("MIN_SEVERITY", "High").strip().lower(),
+            epss_threshold=float(os.getenv("EPSS_THRESHOLD", "0.1")),
             only_fixed=env_bool("ONLY_FIXED"),
             scan_on_pull=env_bool("SCAN_ON_PULL"),
             notify_on_start=env_bool("NOTIFY_ON_START"),

@@ -18,8 +18,10 @@ SBOMs are keyed by image ID so restarts and redeploys of the same image are noop
 
 | Variable | Default | Notes |
 |---|---|---|
-| `APPRISE_URLS` | – | See [Apprise URL Reference](https://appriseit.com/getting-started/universal-syntax/) |
-| `MIN_SEVERITY` | `High` | Alert threshold: `critical`, `high`, `medium`, `low` |
+| `APPRISE_URLS` | – | See [Apprise URL Reference](https://appriseit.com/getting-started/universal-syntax/). Gets normal alerts, and urgent ones too unless `APPRISE_URLS_URGENT` is set |
+| `APPRISE_URLS_URGENT` | – | Separate destinations for urgent alerts (e.g. phone push) |
+| `MIN_SEVERITY` | `High` | Alert threshold for normal findings: `critical`, `high`, `medium`, `low`. Urgent findings always alert |
+| `EPSS_THRESHOLD` | `0.1` | EPSS score (0–1) at which a finding becomes urgent |
 | `ONLY_FIXED` | `false` | Only alert when an upstream fix exists |
 | `RESCAN_INTERVAL_HOURS` | `24` | Re-match SBOMs against a fresh DB |
 | `SCAN_ON_PULL` | `false` | Also react to `image pull` events |
@@ -29,6 +31,27 @@ SBOMs are keyed by image ID so restarts and redeploys of the same image are noop
 | `PRUNE_REMOVED_IMAGES` | `true` | Prune SBOMs of deleted images |
 | `LOG_LEVEL` | `INFO` | `DEBUG` shows Syft/Grype errors per reference |
 
+
+## Alert tiers
+
+Each finding is either **urgent** or **normal**, and each tier is sent as its own message.
+
+A finding is urgent when any of these hold, whatever its severity:
+
+- it is in the [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) catalog (exploited in the wild)
+- its [EPSS](https://www.first.org/epss/) score is at least `EPSS_THRESHOLD`
+- it looks like remote code execution: its CWE is a command/code injection, unsafe deserialization or unrestricted
+  upload class, or its description says so
+
+All three come from Grype's own database, so no extra lookups are made. Alert lines show these signals, plus `DoS` for
+availability-only bugs:
+
+```
+- CVE-2021-42013 [Critical] httpd 2.4.49 (no fix yet) · KEV · EPSS 100% · RCE
+```
+
+Urgent messages use Apprise's `failure` type and a `🔴 URGENT` title. A finding already reported as normal is reported
+again once it becomes urgent, for example when it gets added to KEV.
 
 ## Ignoring CVEs
 
