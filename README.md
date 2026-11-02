@@ -46,3 +46,12 @@ ignore:
 
 The scanner uses [`docker-socket-proxy`](https://github.com/Tecnativa/docker-socket-proxy) which
 allows only GET requests on containers, images and events to avoid direct r/w access to the docker socket
+## Development
+
+Managed with [uv](https://docs.astral.sh/uv/). Sources live in `src/semaphore/`.
+
+```sh
+uv sync                 # create .venv with runtime + dev deps
+uv run pytest           # tests
+uv run semaphore        # run locally (needs syft, grype and DOCKER_HOST)
+```

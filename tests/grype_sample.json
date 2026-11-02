@@ -1,0 +1,434 @@
+{
+ "matches": [
+  {
+   "vulnerability": {
+    "id": "CVE-2021-42013",
+    "severity": "Critical",
+    "description": "It was found that the fix for CVE-2021-41773 in Apache HTTP Server 2.4.50 was insufficient. An attacker could use a path traversal attack to map URLs to files outside the directories configured by Alias-like directives. If files outside of these directories are not protected by the usual default configuration \"require all denied\", these requests can succeed. If CGI scripts are also enabled for these aliased pathes, this could allow for remote code execution. This issue only affects Apache 2.4.49 and Apache 2.4.50 and not earlier versions.",
+    "cwes": [
+     {
+      "cve": "CVE-2021-42013",
+      "cwe": "CWE-22",
+      "source": "security@apache.org",
+      "type": "Secondary"
+     },
+     {
+      "cve": "CVE-2021-42013",
+      "cwe": "CWE-22",
+      "source": "nvd@nist.gov",
+      "type": "Primary"
+     },
+     {
+      "cve": "CVE-2021-42013",
+      "cwe": "NVD-CWE-Other",
+      "source": "nvd@nist.gov",
+      "type": "Primary"
+     }
+    ],
+    "epss": [
+     {
+      "cve": "CVE-2021-42013",
+      "epss": 0.99964,
+      "percentile": 0.99976,
+      "date": "2026-11-01"
+     }
+    ],
+    "cvss": [
+     {
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "metrics": {
+       "baseScore": 9.8,
+       "exploitabilityScore": 3.9,
+       "impactScore": 5.9
+      }
+     },
+     {
+      "vector": "AV:N/AC:L/Au:N/C:P/I:P/A:P",
+      "metrics": {
+       "baseScore": 7.5,
+       "exploitabilityScore": 10,
+       "impactScore": 6.5
+      }
+     },
+     {
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "metrics": {
+       "baseScore": 9.8,
+       "exploitabilityScore": 3.9,
+       "impactScore": 5.9
+      }
+     }
+    ],
+    "fix": {
+     "versions": [],
+     "state": ""
+    },
+    "dataSource": "https://nvd.nist.gov/vuln/detail/CVE-2021-42013",
+    "knownExploited": [
+     {
+      "cve": "CVE-2021-42013",
+      "vendorProject": "Apache",
+      "product": "HTTP Server",
+      "dateAdded": "2021-11-03",
+      "requiredAction": "Apply updates per vendor instructions.",
+      "dueDate": "2021-11-17",
+      "knownRansomwareCampaignUse": "known",
+      "urls": [
+       "https://nvd.nist.gov/vuln/detail/CVE-2021-42013"
+      ],
+      "cwes": [
+       "CWE-22"
+      ]
+     }
+    ]
+   },
+   "relatedVulnerabilities": [],
+   "artifact": {
+    "name": "httpd",
+    "version": "2.4.49"
+   }
+  },
+  {
+   "vulnerability": {
+    "id": "CVE-2023-50387",
+    "severity": "High",
+    "description": "Certain DNSSEC aspects of the DNS protocol (in RFC 4033, 4034, 4035, 6840, and related RFCs) allow remote attackers to cause a denial of service (CPU consumption) via one or more DNSSEC responses, aka the \"KeyTrap\" issue. One of the concerns is that, when there is a zone with many DNSKEY and RRSIG records, the protocol specification implies that an algorithm must evaluate all combinations of DNSKEY and RRSIG records.",
+    "cwes": [
+     {
+      "cve": "CVE-2023-50387",
+      "cwe": "CWE-770",
+      "source": "nvd@nist.gov",
+      "type": "Primary"
+     },
+     {
+      "cve": "CVE-2023-50387",
+      "cwe": "CWE-770",
+      "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+      "type": "Secondary"
+     }
+    ],
+    "epss": [
+     {
+      "cve": "CVE-2023-50387",
+      "epss": 0.9999,
+      "percentile": 0.99984,
+      "date": "2026-11-01"
+     }
+    ],
+    "cvss": [
+     {
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+      "metrics": {
+       "baseScore": 7.5,
+       "exploitabilityScore": 3.9,
+       "impactScore": 3.6
+      }
+     }
+    ],
+    "fix": {
+     "versions": [],
+     "state": "wont-fix"
+    },
+    "dataSource": "https://security-tracker.debian.org/tracker/CVE-2023-50387"
+   },
+   "relatedVulnerabilities": [
+    {
+     "id": "CVE-2023-50387",
+     "description": "Certain DNSSEC aspects of the DNS protocol (in RFC 4033, 4034, 4035, 6840, and related RFCs) allow remote attackers to cause a denial of service (CPU consumption) via one or more DNSSEC responses, aka the \"KeyTrap\" issue. One of the concerns is that, when there is a zone with many DNSKEY and RRSIG records, the protocol specification implies that an algorithm must evaluate all combinations of DNSKEY and RRSIG records.",
+     "cvss": [
+      {
+       "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+       "metrics": {
+        "baseScore": 7.5,
+        "exploitabilityScore": 3.9,
+        "impactScore": 3.6
+       }
+      },
+      {
+       "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+       "metrics": {
+        "baseScore": 7.5,
+        "exploitabilityScore": 3.9,
+        "impactScore": 3.6
+       }
+      }
+     ],
+     "cwes": [
+      {
+       "cve": "CVE-2023-50387",
+       "cwe": "CWE-770",
+       "source": "nvd@nist.gov",
+       "type": "Primary"
+      },
+      {
+       "cve": "CVE-2023-50387",
+       "cwe": "CWE-770",
+       "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+       "type": "Secondary"
+      }
+     ]
+    }
+   ],
+   "artifact": {
+    "name": "libsystemd0",
+    "version": "241-7~deb10u9"
+   }
+  },
+  {
+   "vulnerability": {
+    "id": "CVE-2023-5752",
+    "severity": "Medium",
+    "description": "Command Injection in pip when used with Mercurial",
+    "cwes": [
+     {
+      "cve": "CVE-2023-5752",
+      "cwe": "CWE-77",
+      "source": "cna@python.org",
+      "type": "Secondary"
+     },
+     {
+      "cve": "CVE-2023-5752",
+      "cwe": "CWE-77",
+      "source": "nvd@nist.gov",
+      "type": "Primary"
+     }
+    ],
+    "epss": [
+     {
+      "cve": "CVE-2023-5752",
+      "epss": 0.00502,
+      "percentile": 0.42985,
+      "date": "2026-11-01"
+     }
+    ],
+    "cvss": [
+     {
+      "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N",
+      "metrics": {
+       "baseScore": 5.5,
+       "exploitabilityScore": 1.9,
+       "impactScore": 3.6
+      }
+     },
+     {
+      "vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:L/UI:N/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N",
+      "metrics": {
+       "baseScore": 6.8
+      }
+     }
+    ],
+    "fix": {
+     "versions": [
+      "23.3"
+     ],
+     "state": "fixed",
+     "available": [
+      {
+       "version": "23.3",
+       "date": "2023-11-03",
+       "kind": "first-observed"
+      }
+     ]
+    },
+    "dataSource": "https://github.com/advisories/GHSA-mq26-g339-26xf"
+   },
+   "relatedVulnerabilities": [
+    {
+     "id": "GHSA-mq26-g339-26xf",
+     "description": "Command Injection in pip when used with Mercurial",
+     "cvss": [
+      {
+       "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N",
+       "metrics": {
+        "baseScore": 5.5,
+        "exploitabilityScore": 1.9,
+        "impactScore": 3.6
+       }
+      },
+      {
+       "vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:L/UI:N/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N",
+       "metrics": {
+        "baseScore": 6.8
+       }
+      }
+     ],
+     "cwes": [
+      {
+       "cve": "CVE-2023-5752",
+       "cwe": "CWE-77",
+       "source": "cna@python.org",
+       "type": "Secondary"
+      },
+      {
+       "cve": "CVE-2023-5752",
+       "cwe": "CWE-77",
+       "source": "nvd@nist.gov",
+       "type": "Primary"
+      }
+     ]
+    }
+   ],
+   "artifact": {
+    "name": "pip",
+    "version": "23.0.1"
+   }
+  },
+  {
+   "vulnerability": {
+    "id": "CVE-2021-39537",
+    "severity": "High",
+    "description": "An issue was discovered in ncurses through v6.2-1. _nc_captoinfo in captoinfo.c has a heap-based buffer overflow.",
+    "cwes": [
+     {
+      "cve": "CVE-2021-39537",
+      "cwe": "CWE-787",
+      "source": "nvd@nist.gov",
+      "type": "Primary"
+     }
+    ],
+    "epss": [
+     {
+      "cve": "CVE-2021-39537",
+      "epss": 0.03243,
+      "percentile": 0.88304,
+      "date": "2026-11-01"
+     }
+    ],
+    "cvss": [
+     {
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+      "metrics": {
+       "baseScore": 8.8,
+       "exploitabilityScore": 2.9,
+       "impactScore": 5.9
+      }
+     }
+    ],
+    "fix": {
+     "versions": [
+      "6.1+20181013-2+deb10u5"
+     ],
+     "state": "fixed",
+     "available": [
+      {
+       "version": "6.1+20181013-2+deb10u5",
+       "date": "2026-02-27",
+       "kind": "first-observed"
+      }
+     ]
+    },
+    "dataSource": "https://security-tracker.debian.org/tracker/CVE-2021-39537"
+   },
+   "relatedVulnerabilities": [
+    {
+     "id": "CVE-2021-39537",
+     "description": "An issue was discovered in ncurses through v6.2-1. _nc_captoinfo in captoinfo.c has a heap-based buffer overflow.",
+     "cvss": [
+      {
+       "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+       "metrics": {
+        "baseScore": 8.8,
+        "exploitabilityScore": 2.9,
+        "impactScore": 5.9
+       }
+      },
+      {
+       "vector": "AV:N/AC:M/Au:N/C:P/I:P/A:P",
+       "metrics": {
+        "baseScore": 6.8,
+        "exploitabilityScore": 8.6,
+        "impactScore": 6.5
+       }
+      }
+     ],
+     "cwes": [
+      {
+       "cve": "CVE-2021-39537",
+       "cwe": "CWE-787",
+       "source": "nvd@nist.gov",
+       "type": "Primary"
+      }
+     ]
+    }
+   ],
+   "artifact": {
+    "name": "libncursesw6",
+    "version": "6.1+20181013-2+deb10u3"
+   }
+  },
+  {
+   "vulnerability": {
+    "id": "CVE-2022-4415",
+    "severity": "Medium",
+    "description": "A vulnerability was found in systemd. This security flaw can cause a local information leak due to systemd-coredump not respecting the fs.suid_dumpable kernel setting.",
+    "cwes": [
+     {
+      "cve": "CVE-2022-4415",
+      "cwe": "CWE-200",
+      "source": "secalert@redhat.com",
+      "type": "Secondary"
+     }
+    ],
+    "epss": [
+     {
+      "cve": "CVE-2022-4415",
+      "epss": 0.00822,
+      "percentile": 0.57336,
+      "date": "2026-11-01"
+     }
+    ],
+    "cvss": [
+     {
+      "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+      "metrics": {
+       "baseScore": 5.5,
+       "exploitabilityScore": 1.9,
+       "impactScore": 3.6
+      }
+     }
+    ],
+    "fix": {
+     "versions": [],
+     "state": "wont-fix"
+    },
+    "dataSource": "https://security-tracker.debian.org/tracker/CVE-2022-4415"
+   },
+   "relatedVulnerabilities": [
+    {
+     "id": "CVE-2022-4415",
+     "description": "A vulnerability was found in systemd. This security flaw can cause a local information leak due to systemd-coredump not respecting the fs.suid_dumpable kernel setting.",
+     "cvss": [
+      {
+       "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+       "metrics": {
+        "baseScore": 5.5,
+        "exploitabilityScore": 1.9,
+        "impactScore": 3.6
+       }
+      },
+      {
+       "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+       "metrics": {
+        "baseScore": 5.5,
+        "exploitabilityScore": 1.9,
+        "impactScore": 3.6
+       }
+      }
+     ],
+     "cwes": [
+      {
+       "cve": "CVE-2022-4415",
+       "cwe": "CWE-200",
+       "source": "secalert@redhat.com",
+       "type": "Secondary"
+      }
+     ]
+    }
+   ],
+   "artifact": {
+    "name": "libsystemd0",
+    "version": "241-7~deb10u9"
+   }
+  }
+ ]
+}
