@@ -9,8 +9,8 @@ for every image that is actually running on this Docker host
 SBOMs are generated once per image ID. Vulnerability matching is re-run on the
 stored SBOMs, because new CVEs get published for images that never change
 
-Alerts only cover findings not yet reported for that image
-They're batched into one message
+Alerts only cover findings not yet reported for that image or escalated to urgent since
+They're batched into one message per tier: urgent (KEV, EPSS >= threshold, likely RCE) and normal
 
 Threads: the event watcher and the scheduler only enqueue tasks; the worker
 thread is the only one touching State and Alerter, so no locking is needed
@@ -60,15 +60,18 @@ class Semaphore:
             self.scanner.generate_sbom(image_id, refs)
 
         self.scanner.ensure_db()
-        found, counts = parse_matches(self.scanner.grype_scan(image_id), self.config.min_rank)
+        found, counts = parse_matches(self.scanner.grype_scan(image_id), self.config.min_rank,
+                                      self.config.epss_threshold)
 
-        alerted_before = self.state.alerted(image_id)
-        new = {k: f for k, f in found.items() if k not in alerted_before}
+        before = self.state.alerted(image_id)
+        new = self.state.new_findings(image_id, found)
         containers = sorted(info.get("containers", ()))
         self.state.record_scan(image_id, name, containers, counts, found)
-        log.info("Scanned %s: %s", name, ", ".join(f"{n} {s}" for s, n in counts.items()) or "no vulnerabilities")
+        urgent = sum(f.tier == "urgent" for f in found.values())
+        log.info("Scanned %s: %s%s", name, ", ".join(f"{n} {s}" for s, n in counts.items()) or "no vulnerabilities",
+                 f" ({urgent} urgent)" if urgent else "")
         if new:
-            self.alerter.add(ImageAlert(image_id, name, containers, is_new, new))
+            self.alerter.add(ImageAlert(image_id, name, containers, is_new, new, {k: before.get(k) for k in new}))
 
     def prune(self) -> None:
         for img_id in list(self.state.images):
@@ -147,11 +150,14 @@ class Semaphore:
             d.mkdir(parents=True, exist_ok=True)
 
         self.state.load()
-        log.info("semaphore starting: min severity=%s, only fixed=%s, rescan every %.0fh, pull events=%s",
-                 cfg.min_severity, cfg.only_fixed, cfg.rescan_interval / 3600, cfg.scan_on_pull)
+        log.info("semaphore starting: min severity=%s, urgent at EPSS>=%s/KEV/RCE, only fixed=%s, "
+                 "rescan every %.0fh, pull events=%s", cfg.min_severity, cfg.epss_threshold, cfg.only_fixed,
+                 cfg.rescan_interval / 3600, cfg.scan_on_pull)
 
         if self.alerter.notifier is None:
             log.warning("APPRISE_URLS is not set: alerts will only be written to the log")
+        elif not cfg.apprise_urls:
+            log.warning("Only APPRISE_URLS_URGENT is set: normal-tier alerts will only be written to the log")
         elif cfg.notify_on_start:
             self.alerter.notify_started()
 

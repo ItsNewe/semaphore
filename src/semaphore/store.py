@@ -5,6 +5,7 @@ import json
 import logging
 from pathlib import Path
 
+from .scan import TIER_RANK, Finding
 from .util import now_iso, worst
 
 log = logging.getLogger("semaphore")
@@ -31,6 +32,9 @@ class State:
             return
         self.images = data.get("images", {})
         self.meta = data.get("meta", {})
+        for img in self.images.values():
+            if isinstance(img.get("alerted"), list):  # pre-tier state.json
+                img["alerted"] = dict.fromkeys(img["alerted"], "normal")
 
     def save(self) -> None:
         tmp = self.path.with_suffix(".tmp")
@@ -50,23 +54,38 @@ class State:
     def __contains__(self, image_id: str) -> bool:
         return image_id in self.images
 
-    def record_scan(self, image_id: str, name: str, containers: list[str], counts: dict, alerted) -> None:
+    def alerted(self, image_id: str) -> dict[str, str]:
+        """{finding key: highest tier already alerted} for an image"""
+        return dict(self.images.get(image_id, {}).get("alerted", {}))
+
+    def new_findings(self, image_id: str, found: dict[str, Finding]) -> dict[str, Finding]:
+        """Findings never alerted, or escalated since (normal -> urgent, e.g. newly added to KEV)"""
+        before = self.alerted(image_id)
+        return {k: f for k, f in found.items()
+                if k not in before or TIER_RANK[f.tier] > TIER_RANK[before[k]]}
+
+    def record_scan(self, image_id: str, name: str, containers: list[str], counts: dict,
+                    found: dict[str, Finding]) -> None:
+        """Stores the scan. Alerted tiers only go up, so an EPSS dipping and rising again doesn't re-alert"""
+        before = self.alerted(image_id)
         self.images[image_id] = {
             "name": name,
             "containers": containers,
             "last_scan": now_iso(),
             "counts": counts,
-            "alerted": sorted(alerted),
+            "alerted": {k: max(f.tier, before.get(k, "normal"), key=TIER_RANK.get) for k, f in found.items()},
         }
 
-    def alerted(self, image_id: str) -> set[str]:
-        return set(self.images.get(image_id, {}).get("alerted", []))
-
-    def rollback(self, image_id: str, keys) -> None:
-        """Un-marks findings whose alert failed, so the next rescan reports them again"""
+    def rollback(self, image_id: str, previous: dict[str, str | None]) -> None:
+        """Restores alert marks after a failed send (None = never alerted), so the next rescan retries"""
         img = self.images.get(image_id)
-        if img:
-            img["alerted"] = sorted(set(img["alerted"]) - set(keys))
+        if not img:
+            return
+        for k, tier in previous.items():
+            if tier is None:
+                img["alerted"].pop(k, None)
+            else:
+                img["alerted"][k] = tier
 
     def forget(self, image_id: str) -> dict | None:
         return self.images.pop(image_id, None)

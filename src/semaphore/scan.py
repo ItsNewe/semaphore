@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -14,6 +15,18 @@ from .util import hex_id, rank, run_tool
 
 log = logging.getLogger("semaphore")
 
+TIER_RANK = {"normal": 0, "urgent": 1}
+
+# ponytail: CWE + keyword heuristic. Memory corruption (CWE-787/416/...) stays unclassified
+# unless the description says code execution; most of those are crashes in practice
+RCE_CWES = {"CWE-77", "CWE-78", "CWE-94", "CWE-95", "CWE-434", "CWE-502", "CWE-917", "CWE-1336"}
+DOS_CWES = {"CWE-400", "CWE-407", "CWE-476", "CWE-674", "CWE-770", "CWE-789", "CWE-834", "CWE-835", "CWE-1333"}
+RCE_TEXT = re.compile(r"remote code execution|arbitrary code execution|execute arbitrary (code|commands)"
+                      r"|command injection|code injection", re.I)
+DOS_TEXT = re.compile(r"denial of service|infinite loop|resource exhaustion|\bcrash", re.I)
+# Availability-only impact, CVSS v3 (C:N/I:N/A:H) or v4 (VC:N/VI:N/VA:H)
+DOS_VECTOR = re.compile(r"\bV?C:N/V?I:N/V?A:[LH]\b")
+
 
 @dataclass
 class Finding:
@@ -23,6 +36,23 @@ class Finding:
     version: str
     fix: str
     url: str
+    kev: bool = False
+    epss: float | None = None
+    cls: str = ""  # "RCE", "DoS" or ""
+    tier: str = "normal"  # "urgent" or "normal"
+
+
+def exploit_class(vuln: dict, related: list[dict]) -> str:
+    """Rough impact class from CWEs, descriptions and CVSS vectors of the vuln and its NVD entries"""
+    entries = [vuln, *related]
+    cwes = {c.get("cwe") for e in entries for c in e.get("cwes") or []}
+    text = " ".join(e.get("description") or "" for e in entries)
+    if cwes & RCE_CWES or RCE_TEXT.search(text):
+        return "RCE"
+    vectors = (c.get("vector") or "" for e in entries for c in e.get("cvss") or [])
+    if cwes & DOS_CWES or DOS_TEXT.search(text) or any(DOS_VECTOR.search(v) for v in vectors):
+        return "DoS"
+    return ""
 
 
 class Scanner:
@@ -95,25 +125,36 @@ class Scanner:
         return json.loads(out)
 
 
-def parse_matches(report: dict, min_rank: int) -> tuple[dict[str, Finding], dict]:
-    """Returns (findings at/above min_rank keyed by vuln|pkg|version, counts for all severities)"""
+def parse_matches(report: dict, min_rank: int, epss_threshold: float) -> tuple[dict[str, Finding], dict]:
+    """Returns (alertable findings keyed by vuln|pkg|version, counts for all severities)
+
+    Alertable = at/above min_rank, or urgent at any severity: a known-exploited
+    Medium matters more than an unexploited High
+    """
     unique: dict = {}
     for m in report.get("matches", []):
         v, a = m.get("vulnerability", {}), m.get("artifact", {})
         sev = (v.get("severity") or "Unknown").capitalize()
-        unique.setdefault(f'{v.get("id")}|{a.get("name")}|{a.get("version")}', (sev, v, a))
+        unique.setdefault(f'{v.get("id")}|{a.get("name")}|{a.get("version")}', (sev, m))
 
-    counts = dict(Counter(sev for sev, _, _ in unique.values()))
-    found = {
-        key: Finding(
+    counts = dict(Counter(sev for sev, _ in unique.values()))
+    found: dict[str, Finding] = {}
+    for key, (sev, m) in unique.items():
+        v, a = m.get("vulnerability", {}), m.get("artifact", {})
+        epss = max((e.get("epss") or 0.0 for e in v.get("epss") or []), default=None)
+        f = Finding(
             id=v.get("id"),
             severity=sev,
             pkg=a.get("name"),
             version=a.get("version"),
             fix=", ".join((v.get("fix") or {}).get("versions") or []),
             url=v.get("dataSource", ""),
+            kev=bool(v.get("knownExploited")),
+            epss=epss,
+            cls=exploit_class(v, m.get("relatedVulnerabilities") or []),
         )
-        for key, (sev, v, a) in unique.items()
-        if rank(sev) >= min_rank
-    }
+        if f.kev or (epss is not None and epss >= epss_threshold) or f.cls == "RCE":
+            f.tier = "urgent"
+        if f.tier == "urgent" or rank(sev) >= min_rank:
+            found[key] = f
     return found, counts
