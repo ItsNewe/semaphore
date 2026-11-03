@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import apprise
+from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -39,7 +40,7 @@ from textual.widgets import (
     TabPane,
 )
 
-from .alerts import TIERS, Alerter, ImageAlert
+from .alerts import TIERS, Alerter, ImageAlert, importance
 from .config import SEV_RANK, Config
 from .scan import Finding
 from .store import State
@@ -152,6 +153,78 @@ class Confirm(ModalScreen[bool]):
         self.dismiss(event.button.id == "yes")
 
 
+class Findings(ModalScreen):
+    """Every finding of an image's last scan, most severe first. Non-alertable ones dimmed"""
+
+    BINDINGS: ClassVar[list] = [("escape", "dismiss", "Close")]
+
+    DEFAULT_CSS = """
+    Findings { align: center middle; }
+    Findings > Vertical { width: 90%; height: 80%; border: thick $primary; background: $surface; padding: 1 2; }
+    Findings DataTable { height: 1fr; }
+    """
+
+    def __init__(
+        self, name: str, findings: list[tuple[str, Finding, bool]], update: dict | None
+    ) -> None:
+        super().__init__()
+
+        self.title_text = f"{name}: {plural(len(findings), 'finding', 'findings')}, {sum(a for *_, a in findings)} alertable"
+        self.findings = sorted(
+            findings, key=lambda kfa: (-rank(kfa[1].severity), importance(kfa[1]))
+        )
+        update = update or {}
+        self.update_ref = update.get("ref")
+        self.fixed = {*update.get("fixes", ()), *update.get("also_fixes", ())}
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(self.title_text)
+            yield DataTable(cursor_type="row")
+
+    def on_mount(self) -> None:
+        table = self.query_one(DataTable)
+
+        table.add_columns("CVE", "Severity", "Package", "Version", "Fix", "Tags")
+
+        for key, f, alertable in self.findings:
+            style = "" if alertable else "dim"
+            tags = [
+                t
+                for t in (
+                    "KEV" if f.kev else "",
+                    f"EPSS {f.epss:.0%}" if f.epss else "",
+                    f.cls,
+                    "urgent" if f.tier == "urgent" else "",
+                )
+                if t
+            ]
+            cve = Text(f.id or "", style=style)
+
+            if key in self.fixed:
+                cve.append(f" (fixed in {self.update_ref})", style="green")
+
+            table.add_row(
+                cve,
+                *(
+                    Text(v or "", style=style)
+                    for v in (f.severity, f.pkg, f.version, f.fix, " ".join(tags))
+                ),
+            )
+
+        table.focus()
+
+
+class ImageTable(DataTable):
+    BINDINGS: ClassVar[list] = [Binding("space", "tick", "Tick")]
+
+    def action_tick(self) -> None:
+        if self.row_count:
+            self.app.toggle_image(
+                self.coordinate_to_cell_key(self.cursor_coordinate).row_key
+            )
+
+
 class SemaphoreTUI(App):
     TITLE = "sémaphore"
 
@@ -222,8 +295,8 @@ class SemaphoreTUI(App):
                     yield Button("Save", variant="primary", classes="save")
 
             with TabPane("Images", id="images"):
-                yield Label("Enter or click ticks an image")
-                yield DataTable(id="image-table", cursor_type="row")
+                yield Label("Space ticks an image for rescan, enter shows its CVEs")
+                yield ImageTable(id="image-table", cursor_type="row")
 
                 with Horizontal(classes="target"):
                     yield Button(
@@ -373,19 +446,31 @@ class SemaphoreTUI(App):
                 key=r["id"],
             )
 
-    @on(DataTable.RowSelected, "#image-table")
-    def toggle_image(self, event: DataTable.RowSelected) -> None:
-        img_id = event.row_key.value
+    def toggle_image(self, row_key) -> None:
+        img_id = row_key.value
         self.selected ^= {img_id}
 
-        event.data_table.update_cell(
-            event.row_key, "sel", "✓" if img_id in self.selected else ""
+        self.query_one("#image-table", DataTable).update_cell(
+            row_key, "sel", "✓" if img_id in self.selected else ""
+        )
+
+    @on(DataTable.RowSelected, "#image-table")
+    def show_findings(self, event: DataTable.RowSelected) -> None:
+        img_id = event.row_key.value
+        state = State(self.base.data_dir, readonly=True)
+
+        self.push_screen(
+            Findings(
+                event.data_table.get_row(event.row_key)[1],
+                state.findings(img_id),
+                state.update(img_id),
+            )
         )
 
     @on(Button.Pressed, "#rescan-selected")
     def rescan_selected(self) -> None:
         if not self.selected:
-            self.notify("Tick images first (enter or click)", severity="warning")
+            self.notify("Tick images first (space)", severity="warning")
 
             return
 

@@ -78,7 +78,7 @@ class Semaphore:
 
         self.scanner.ensure_db()
 
-        found, counts = parse_matches(
+        found, counts, rest = parse_matches(
             self.scanner.grype_scan(image_id),
             self.config.min_rank,
             self.config.epss_threshold,
@@ -90,7 +90,7 @@ class Semaphore:
             # Configured refs first: their tag may have moved to a newer pull since this container started
             try:
                 update = self.updates.check(
-                    image_id, [*sorted(info.get("refs", ())), *refs], found
+                    image_id, [*sorted(info.get("refs", ())), *refs], found, rest
                 )
             except RuntimeError as e:
                 log.warning("Update check failed for %s: %s", name, e)
@@ -101,7 +101,7 @@ class Semaphore:
         new = self.state.new_findings(image_id, found)
         containers = sorted(info.get("containers", ()))
 
-        self.state.record_scan(image_id, name, containers, counts, found, update)
+        self.state.record_scan(image_id, name, containers, counts, found, update, rest)
 
         update = self.state.update(image_id)
         urgent = sum(f.tier == "urgent" for f in found.values())

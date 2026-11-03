@@ -1,6 +1,6 @@
 """Persistent scan state in <data_dir>/semaphore.db (SQLite) and the human-readable summary.json
 
-Tables: images (latest scan per image), findings (alertable findings of that scan with the highest tier
+Tables: images (latest scan per image), findings (every finding of that scan, alertable flag, highest tier
 alerted), scans (append-only log of every scan with the finding keys added and removed), meta
 
 Writes stay in one open transaction until save(), so a failed send rolls its marks back before they
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS images (
 );
 CREATE TABLE IF NOT EXISTS findings (
     image_id TEXT NOT NULL, key TEXT NOT NULL, {", ".join(FINDING_COLS)},
-    alerted TEXT, first_seen TEXT, PRIMARY KEY (image_id, key)
+    alerted TEXT, first_seen TEXT, alertable INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (image_id, key)
 );
 CREATE TABLE IF NOT EXISTS scans (
     image_id TEXT, name TEXT, scanned TEXT, counts TEXT, added TEXT, removed TEXT, update_ref TEXT
@@ -62,6 +62,14 @@ class State:
 
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.executescript(SCHEMA)
+
+            if "alertable" not in {
+                r[1] for r in self.db.execute("PRAGMA table_info(findings)")
+            }:  # DBs from before non-alertable findings were stored
+                self.db.execute(
+                    "ALTER TABLE findings ADD COLUMN alertable INTEGER NOT NULL DEFAULT 1"
+                )
+
             self.import_legacy()
 
     def save(self) -> None:
@@ -193,6 +201,17 @@ class State:
             )
         )
 
+    def findings(self, image_id: str) -> list[tuple[str, Finding, bool]]:
+        """(key, finding, alertable) for every finding of an image's last scan"""
+
+        return [
+            (key, Finding(*r[:-1]), bool(r[-1]))
+            for key, *r in self.db.execute(
+                f"SELECT key, {', '.join(FINDING_COLS)}, alertable FROM findings WHERE image_id = ?",
+                (image_id,),
+            )
+        ]
+
     def new_findings(
         self, image_id: str, found: dict[str, Finding]
     ) -> dict[str, Finding]:
@@ -214,18 +233,26 @@ class State:
         counts: dict,
         found: dict[str, Finding],
         update: dict | None = None,
+        rest: dict[str, Finding] | None = None,
     ) -> None:
         """Stores the scan and logs it. Alerted tiers only go up, so an EPSS dipping and rising again doesn't re-alert
 
         update: best fixing candidate from UpdateChecker. Its "notified" digest carries over between scans
+        rest: non-alertable findings, stored for display only (never marked alerted)
         """
 
         before = self.alerted(image_id)
-        seen = dict(
-            self.db.execute(
-                "SELECT key, first_seen FROM findings WHERE image_id = ?", (image_id,)
-            )
-        )
+        seen, was_alertable = {}, set()
+
+        for k, first_seen, alertable in self.db.execute(
+            "SELECT key, first_seen, alertable FROM findings WHERE image_id = ?",
+            (image_id,),
+        ):
+            seen[k] = first_seen
+
+            if alertable:
+                was_alertable.add(k)
+
         notified = (self.update(image_id) or {}).get("notified")
         now = now_iso()
         update = {**update, "notified": notified} if update else None
@@ -233,8 +260,8 @@ class State:
         self.put_image(image_id, name, containers, now, counts, update)
         self.db.execute("DELETE FROM findings WHERE image_id = ?", (image_id,))
         self.db.executemany(
-            f"INSERT INTO findings (image_id, key, {', '.join(FINDING_COLS)}, alerted, first_seen)"
-            f" VALUES ({', '.join('?' * (len(FINDING_COLS) + 4))})",
+            f"INSERT INTO findings (image_id, key, {', '.join(FINDING_COLS)}, alerted, first_seen, alertable)"
+            f" VALUES ({', '.join('?' * (len(FINDING_COLS) + 5))})",
             [
                 (
                     image_id,
@@ -242,8 +269,13 @@ class State:
                     *astuple(f),
                     max(f.tier, before.get(k, "normal"), key=TIER_RANK.get),
                     seen.get(k, now),
+                    1,
                 )
                 for k, f in found.items()
+            ]
+            + [
+                (image_id, k, *astuple(f), None, seen.get(k, now), 0)
+                for k, f in (rest or {}).items()
             ],
         )
 
@@ -255,8 +287,8 @@ class State:
                 name,
                 now,
                 json.dumps(counts),
-                json.dumps(sorted(found.keys() - seen.keys())),
-                json.dumps(sorted(seen.keys() - found.keys())),
+                json.dumps(sorted(found.keys() - was_alertable)),
+                json.dumps(sorted(was_alertable - found.keys())),
                 update and update["ref"],
             ),
         )

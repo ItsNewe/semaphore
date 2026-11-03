@@ -222,12 +222,12 @@ class Scanner:
 
 def parse_matches(
     report: dict, min_rank: int, epss_threshold: float, skip_wont_fix: bool = True
-) -> tuple[dict[str, Finding], dict]:
-    """Returns (alertable findings keyed by vuln|pkg|version, counts for all severities)
+) -> tuple[dict[str, Finding], dict, dict[str, Finding]]:
+    """Returns (alertable findings keyed by vuln|pkg|version, counts for all severities, the other findings)
 
     Alertable = at/above min_rank, or urgent at any severity: a known-exploited
     Medium matters more than an unexploited High. Findings the distro won't fix
-    (Debian no-dsa/ignored, fix state "wont-fix") are skipped unless known-exploited or skip_wont_fix is off
+    (Debian no-dsa/ignored, fix state "wont-fix") are not alertable unless known-exploited or skip_wont_fix is off
     """
 
     unique: dict = {}
@@ -241,17 +241,10 @@ def parse_matches(
     counts = dict(Counter(sev for sev, _ in unique.values()))
 
     found: dict[str, Finding] = {}
+    rest: dict[str, Finding] = {}
 
     for key, (sev, m) in unique.items():
         v, a = m.get("vulnerability", {}), m.get("artifact", {})
-
-        if (
-            skip_wont_fix
-            and (v.get("fix") or {}).get("state") == "wont-fix"
-            and not v.get("knownExploited")
-        ):
-            continue
-
         epss = max((e.get("epss") or 0.0 for e in v.get("epss") or []), default=None)
         f = Finding(
             id=v.get("id"),
@@ -268,7 +261,13 @@ def parse_matches(
         if f.kev or (epss is not None and epss >= epss_threshold) or f.cls == "RCE":
             f.tier = "urgent"
 
-        if f.tier == "urgent" or rank(sev) >= min_rank:
-            found[key] = f
+        wont_fix = (
+            skip_wont_fix
+            and (v.get("fix") or {}).get("state") == "wont-fix"
+            and not f.kev
+        )
+        alertable = f.tier == "urgent" or rank(sev) >= min_rank
 
-    return found, counts
+        (found if alertable and not wont_fix else rest)[key] = f
+
+    return found, counts, rest

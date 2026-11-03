@@ -149,9 +149,15 @@ class UpdateChecker:
         return json.loads(self.scanner.match(sbom, only_fixed=False))
 
     def check(
-        self, image_id: str, refs: list[str], found: dict[str, Finding]
+        self,
+        image_id: str,
+        refs: list[str],
+        found: dict[str, Finding],
+        rest: dict[str, Finding] | None = None,
     ) -> dict | None:
-        """The candidate fixing the most findings (rebuild wins ties), None if none fixes any
+        """The candidate fixing the most alertable findings (rebuild wins ties), None if none fixes any
+
+        rest: non-alertable findings, only reported in "also_fixes"
 
         refs: the image's references, repo@digest ones included. Raises RuntimeError when the registry
         can't be queried, so callers can keep the previous result
@@ -182,6 +188,7 @@ class UpdateChecker:
                     "pull": pull,
                     "digest": digest,
                     "fixes": sorted(fixes),
+                    "also_fixes": sorted(fixed_by(rest or {}, report)),
                     "checked": now_iso(),
                     # candidate is matched without --only-fixed, comparable to the image's counts only with ONLY_FIXED off
                     "counts": parse_matches(

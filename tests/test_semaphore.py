@@ -22,7 +22,7 @@ IMG = "sha256:abc"
 
 
 def parse(cfg=Config()):
-    return parse_matches(SAMPLE, cfg.min_rank, cfg.epss_threshold)
+    return parse_matches(SAMPLE, cfg.min_rank, cfg.epss_threshold)[:2]
 
 
 def test_parse_matches_tiers():
@@ -39,9 +39,30 @@ def test_parse_matches_tiers():
     )  # CWE-77 but needs privileges (PR:L): not RCE, so a plain Medium
     assert (found[PLAIN].cls, found[PLAIN].tier) == ("", "normal")
 
+    # Non-alertable ones come back separately, together they cover every counted match
+    rest = parse_matches(SAMPLE, Config().min_rank, Config().epss_threshold)[2]
+
+    assert RCE_MEDIUM in rest and not rest.keys() & found.keys()
+    assert len(found) + len(rest) == sum(counts.values())
+
+
+def test_non_alertable_findings_stored_but_never_marked(tmp_path):
+    found, counts, rest = parse_matches(
+        SAMPLE, Config().min_rank, Config().epss_threshold
+    )
+    s = State(tmp_path)
+
+    s.record_scan(IMG, "img:1", [], counts, found, rest=rest)
+
+    flags = {k: a for k, _, a in s.findings(IMG)}
+
+    assert flags == {**dict.fromkeys(found, True), **dict.fromkeys(rest, False)}
+    assert s.alerted(IMG).keys() == found.keys()
+    assert next(f for k, f, _ in s.findings(IMG) if k == RCE_MEDIUM) == rest[RCE_MEDIUM]
+
 
 def test_wont_fix_dropped_unless_known_exploited():
-    found, _ = parse_matches(json.loads(RAW), 0, 0.1)
+    found, *_ = parse_matches(json.loads(RAW), 0, 0.1)
 
     assert {f.id for f in found.values()} == {
         "CVE-2021-42013",
@@ -573,7 +594,7 @@ def test_rescan_request_discards_and_rescans_running_images(tmp_path):
 def test_tui_lists_images_and_requests_rescan_after_confirm(tmp_path, monkeypatch):
     import asyncio
 
-    from semaphore.tui import Confirm, SemaphoreTUI
+    from semaphore.tui import Confirm, Findings, SemaphoreTUI
 
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
 
@@ -604,7 +625,16 @@ def test_tui_lists_images_and_requests_rescan_after_confirm(tmp_path, monkeypatc
             app.query_one("TabbedContent").active = "images"
             await pilot.pause()
             table.focus()
-            await pilot.press("enter")  # tick the row
+            await pilot.press("space")  # tick the row
+            assert app.selected == {IMG}
+
+            await pilot.press("enter")  # CVE dialog
+            await pilot.pause()
+            assert isinstance(app.screen, Findings)
+            cves = app.screen.query_one("DataTable").get_column_at(0)
+            assert any("(fixed in httpd:2.4.69)" in str(c) for c in cves)
+            await pilot.press("escape")
+            await pilot.pause()
             assert app.selected == {IMG}
 
             app.rescan_selected()
