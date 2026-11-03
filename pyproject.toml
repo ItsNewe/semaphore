@@ -6,10 +6,12 @@ requires-python = ">=3.12"
 dependencies = [
     "apprise>=1.9",
     "docker>=7.1",
+    "textual>=8.2.8",
 ]
 
 [project.scripts]
 semaphore = "semaphore.app:main"
+semaphore-tui = "semaphore.tui:main"
 
 [build-system]
 requires = ["uv_build>=0.13.6,<0.14"]

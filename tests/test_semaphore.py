@@ -191,6 +191,12 @@ def test_flush_sends_one_message_per_tier_and_rolls_back_failed_tier(tmp_path):
     assert state.alerted(IMG) == {PLAIN: "normal"}  # urgent ones un-marked for retry
     assert alerter.pending == []
 
+    batch = state.meta["last_batch"]["messages"]
+
+    assert [m["tier"] for m in batch] == ["urgent", "normal"] and batch[0][
+        "title"
+    ] == urgent["title"]
+
 
 def test_format_groups_packages_and_puts_important_first():
     new = {
@@ -241,6 +247,107 @@ def test_default_routing_sends_urgent_to_main_urls():
 
     assert len(list(b.notifier.find("urgent"))) == 1
     assert len(list(b.notifier.find("normal"))) == 1
+
+
+def test_settings_file_overrides_env_and_bad_file_is_ignored(tmp_path):
+    env = Config(data_dir=tmp_path, apprise_urls="json://localhost/a")
+
+    assert env.apply_settings() is env  # no file
+    env.settings_path.write_text(
+        json.dumps(
+            {
+                "min_severity": "Critical",
+                "epss_threshold": 0.5,
+                "targets": [{"url": "json://localhost/b", "tiers": ["urgent"]}],
+            }
+        )
+    )
+
+    cfg = env.apply_settings()
+
+    assert (cfg.min_severity, cfg.epss_threshold) == ("critical", 0.5)
+
+    a = Alerter(cfg)
+
+    assert len(list(a.notifier.find("urgent"))) == 1 and not any(
+        a.notifier.find("normal")
+    )
+    env.settings_path.write_text(json.dumps({"targets": []}))
+    assert env.apply_settings().routes() == []  # emptied in the TUI, no fallback to env
+    env.settings_path.write_text(json.dumps({"min_severity": "bogus"}))
+    assert env.apply_settings() is env
+
+
+def test_tui_saves_settings(tmp_path, monkeypatch):
+    import asyncio
+
+    from semaphore.tui import SemaphoreTUI, TargetRow
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("APPRISE_URLS", "json://localhost/a")
+
+    async def run():
+        app = SemaphoreTUI()
+
+        async with app.run_test() as pilot:
+            assert len(app.query(TargetRow)) == 1  # pre-filled from env
+            app.query_one("#epss").value = "0.3"
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+
+    asyncio.run(run())
+
+    saved = json.loads((tmp_path / "settings.json").read_text())
+
+    assert saved == {
+        "min_severity": "high",
+        "epss_threshold": 0.3,
+        "targets": [{"url": "json://localhost/a", "tiers": ["urgent", "normal"]}],
+    }
+
+
+def test_daemon_reloads_settings_when_file_changes(tmp_path):
+    import os
+
+    from semaphore.app import Semaphore
+
+    sem = Semaphore(Config(data_dir=tmp_path))
+
+    assert sem.alerter.notifier is None
+    sem.config.settings_path.write_text(
+        json.dumps(
+            {
+                "min_severity": "low",
+                "targets": [{"url": "json://localhost/a", "tiers": ["normal"]}],
+            }
+        )
+    )
+    os.utime(sem.config.settings_path, (1, 1))
+    sem.reload_settings()
+    assert sem.config.min_severity == "low" and any(sem.alerter.notifier.find("normal"))
+
+
+def test_tui_double_ctrl_c_quits(tmp_path, monkeypatch):
+    import asyncio
+
+    from semaphore.tui import SemaphoreTUI
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    async def run():
+        app = SemaphoreTUI()
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+c")
+            assert app.is_running
+            app.query_one(
+                "#epss"
+            ).focus()  # inputs bind ctrl+c to copy, quitting must still win
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert not app.is_running
+
+    asyncio.run(run())
 
 
 def test_newer_tag_stays_in_line_and_suffix():

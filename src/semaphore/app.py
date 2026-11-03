@@ -40,11 +40,15 @@ log = logging.getLogger("semaphore")
 
 class Semaphore:
     def __init__(self, config: Config) -> None:
-        self.config = config
+        self.base = (
+            config  # env only, settings.json is re-applied on top when it changes
+        )
+        self.settings_mtime = self.settings_stamp()
+        self.config = config.apply_settings()
         self.state = State(config.data_dir)
         self.scanner = Scanner(config)
         self.updates = UpdateChecker(config, self.scanner)
-        self.alerter = Alerter(config)
+        self.alerter = Alerter(self.config)
         self.tasks: queue.Queue[tuple] = queue.Queue()
         self.host: DockerHost | None = (
             None  # created in run(), used by the worker thread only
@@ -182,11 +186,39 @@ class Semaphore:
         self.state.save()
         self.state.write_summary()
 
+    def settings_stamp(self) -> float | None:
+        try:
+            return self.base.settings_path.stat().st_mtime
+        except OSError:
+            return None
+
+    def reload_settings(self) -> None:
+        """Re-applies settings.json when the TUI changed it"""
+
+        stamp = self.settings_stamp()
+
+        if stamp == self.settings_mtime:
+            return
+
+        self.settings_mtime = stamp
+        self.config = self.base.apply_settings()
+
+        self.alerter.configure(self.config)
+        log.info(
+            "Settings reloaded: min severity=%s, urgent at EPSS>=%s, %d notification target(s)",
+            self.config.min_severity,
+            self.config.epss_threshold,
+            len(self.config.routes()),
+        )
+
     # ------------------------------------------------------------ threads
 
     def worker(self) -> None:
         while True:
-            safe(self.handle, self.tasks.get())
+            task = self.tasks.get()
+
+            safe(self.reload_settings)
+            safe(self.handle, task)
 
             if self.tasks.empty():
                 safe(self.end_of_batch)
@@ -253,11 +285,11 @@ class Semaphore:
 
         if self.alerter.notifier is None:
             log.warning(
-                "APPRISE_URLS is not set: alerts will only be written to the log"
+                "No notification targets: alerts will only be written to the log"
             )
-        elif not cfg.apprise_urls:
+        elif not any(self.alerter.notifier.find("normal")):
             log.warning(
-                "Only APPRISE_URLS_URGENT is set: normal-tier alerts will only be written to the log"
+                "No target gets normal-tier alerts: those will only be written to the log"
             )
         elif cfg.notify_on_start:
             self.alerter.notify_started()
