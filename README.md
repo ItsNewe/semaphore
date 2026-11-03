@@ -23,6 +23,7 @@ SBOMs are keyed by image ID so restarts and redeploys of the same image are noop
 | `MIN_SEVERITY` | `High` | Alert threshold for normal findings: `critical`, `high`, `medium`, `low`. Urgent findings always alert |
 | `EPSS_THRESHOLD` | `0.1` | EPSS score (0–1) at which a finding becomes urgent |
 | `ONLY_FIXED` | `false` | Only alert when an upstream fix exists |
+| `SKIP_WONT_FIX` | `true` | Skip findings the distro marks won't-fix (Debian no-dsa/ignored), unless in CISA KEV |
 | `RESCAN_INTERVAL_HOURS` | `24` | Re-match SBOMs against a fresh DB |
 | `SCAN_ON_PULL` | `false` | Also react to `image pull` events |
 | `EXCLUDE_IMAGES` | – | Regex to filter image names |
@@ -41,7 +42,7 @@ A finding is urgent when any of these hold, whatever its severity:
 - it is in the [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) catalog (exploited in the wild)
 - its [EPSS](https://www.first.org/epss/) score is at least `EPSS_THRESHOLD`
 - it looks like remote code execution: its CWE is a command/code injection, unsafe deserialization or unrestricted
-  upload class, or its description says so
+  upload class, or its description says so, and its CVSS score says no privileges are needed (`PR:N`)
 
 All three come from Grype's own database, so no extra lookups are made. Alert lines show these signals, plus `DoS` for
 availability-only bugs:
@@ -49,6 +50,9 @@ availability-only bugs:
 ```
 - CVE-2021-42013 [Critical] httpd 2.4.49 (no fix yet) · KEV · EPSS 100% · RCE
 ```
+
+Findings the distro won't fix (Debian `no-dsa`/`ignored`, Grype fix state `wont-fix`) are not alerted unless they are
+in KEV. Set `SKIP_WONT_FIX=false` to alert on them too.
 
 Urgent messages use Apprise's `failure` type and a `🔴 URGENT` title. A finding already reported as normal is reported
 again once it becomes urgent, for example when it gets added to KEV.

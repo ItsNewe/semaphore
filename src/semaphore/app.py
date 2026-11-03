@@ -71,6 +71,7 @@ class Semaphore:
             self.scanner.grype_scan(image_id),
             self.config.min_rank,
             self.config.epss_threshold,
+            self.config.skip_wont_fix,
         )
         before = self.state.alerted(image_id)
         new = self.state.new_findings(image_id, found)
@@ -207,10 +208,11 @@ class Semaphore:
         self.state.load()
         log.info(
             "semaphore starting: min severity=%s, urgent at EPSS>=%s/KEV/RCE, only fixed=%s, "
-            "rescan every %.0fh, pull events=%s",
+            "skip won't-fix=%s, rescan every %.0fh, pull events=%s",
             cfg.min_severity,
             cfg.epss_threshold,
             cfg.only_fixed,
+            cfg.skip_wont_fix,
             cfg.rescan_interval / 3600,
             cfg.scan_on_pull,
         )

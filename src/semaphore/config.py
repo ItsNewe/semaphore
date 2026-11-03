@@ -37,6 +37,7 @@ class Config:
     min_severity: str = "high"
     epss_threshold: float = 0.1
     only_fixed: bool = False
+    skip_wont_fix: bool = True
     scan_on_pull: bool = False
     notify_on_start: bool = False
     prune_removed: bool = True
@@ -78,6 +79,7 @@ class Config:
             min_severity=os.getenv("MIN_SEVERITY", "High").strip().lower(),
             epss_threshold=float(os.getenv("EPSS_THRESHOLD", "0.1")),
             only_fixed=env_bool("ONLY_FIXED"),
+            skip_wont_fix=env_bool("SKIP_WONT_FIX", True),
             scan_on_pull=env_bool("SCAN_ON_PULL"),
             notify_on_start=env_bool("NOTIFY_ON_START"),
             prune_removed=env_bool("PRUNE_REMOVED_IMAGES", True),
