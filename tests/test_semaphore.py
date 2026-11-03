@@ -241,3 +241,152 @@ def test_default_routing_sends_urgent_to_main_urls():
 
     assert len(list(b.notifier.find("urgent"))) == 1
     assert len(list(b.notifier.find("normal"))) == 1
+
+
+def test_newer_tag_stays_in_line_and_suffix():
+    from semaphore.updates import newer_tag
+
+    tags = [
+        "1.27.2",
+        "1.27.3",
+        "1.27.10",
+        "1.28.0",
+        "1.27.11-alpine",
+        "v1.27.12",
+        "latest",
+        "1.27",
+    ]
+
+    assert newer_tag("1.27.3", tags) == "1.27.10"  # numeric, not lexical; no 1.28 jump
+    assert newer_tag("1.27.10", tags) is None
+    assert newer_tag("1.27.3-alpine", tags) == "1.27.11-alpine"
+    assert newer_tag("v1.27.3", tags) == "v1.27.12"
+    assert (
+        newer_tag("3.12-slim", ["3.13-slim", "3.14-slim", "4.0-slim", "3.14"])
+        == "3.14-slim"
+    )
+    assert newer_tag("latest", tags) is None and newer_tag("3", ["4", "5"]) is None
+
+
+def test_split_ref():
+    from semaphore.updates import split_ref
+
+    assert split_ref("nginx:1.27") == ("nginx", "1.27")
+    assert split_ref("localhost:5000/app") == ("localhost:5000/app", "latest")
+    assert split_ref("ghcr.io/a/b:v2") == ("ghcr.io/a/b", "v2")
+    assert split_ref("nginx@sha256:abc") is None and split_ref("sha256:abc") is None
+
+
+def candidate_without_kev():
+    return {
+        "matches": [
+            m for m in SAMPLE["matches"] if m["vulnerability"]["id"] != "CVE-2021-42013"
+        ]
+    }
+
+
+def test_update_check_scans_newer_tag_once_and_reports_fixes(tmp_path, monkeypatch):
+    import semaphore.updates as updates
+    from semaphore.scan import Scanner
+
+    calls = []
+
+    def fake_run(cmd, timeout, **kw):
+        calls.append(cmd[:2])
+
+        if cmd[:2] == ["crane", "digest"]:
+            return {"httpd:2.4.49": "sha256:old\n", "httpd:2.4.69": "sha256:new\n"}[
+                cmd[2]
+            ]
+
+        if cmd[:2] == ["crane", "ls"]:
+            return "2.4.48\n2.4.49\n2.4.69\n2.4.70-alpine\n2.5.0\nlatest\n"
+
+        Path(cmd[-1].split("=", 1)[1]).write_text("{}")  # syft
+
+        return ""
+
+    monkeypatch.setattr(updates, "run_tool", fake_run)
+
+    cfg = Config(data_dir=tmp_path)
+
+    cfg.sbom_dir.mkdir()
+
+    scanner = Scanner(cfg)
+    scanner.match = lambda sbom, only_fixed: json.dumps(candidate_without_kev())
+    checker = updates.UpdateChecker(cfg, scanner)
+    found, _ = parse()
+    refs = [
+        "abc12",
+        "httpd:2.4.49",
+        "httpd@sha256:old",
+        "abc123",
+    ]  # short ID hint first, bare ID last
+    u = checker.check("sha256:abc123", refs, found)
+
+    assert (u["ref"], u["pull"], u["fixes"]) == (
+        "httpd:2.4.69",
+        "httpd@sha256:new",
+        [KEV],
+    )
+    checker.check("sha256:abc123", refs, found)
+    assert calls.count(["syft", "scan"]) == 1  # SBOM cached by digest
+    assert (
+        checker.check("sha256:abc123", ["abc123"], found) is None
+    )  # local build, no registry calls
+
+
+def test_update_shows_in_alert_and_notice_retries_until_sent(tmp_path):
+    found, counts = parse()
+    update = {
+        "ref": "httpd:2.4.69",
+        "pull": "httpd@sha256:new",
+        "digest": "sha256:new",
+        "fixes": [KEV],
+        "checked": "now",
+    }
+    state = State(tmp_path)
+
+    state.record_scan(IMG, "httpd:2.4.49", ["web"], counts, found, update)
+
+    class FailingNotice(FakeNotifier):
+        def notify(self, **kw):
+            self.calls.append(kw)
+
+            return self.ok or not kw["title"].startswith("⬆")
+
+    for ok in (False, True):
+        notifier = FailingNotice(ok=ok)
+        alerter = Alerter(Config(), notifier)
+
+        alerter.add(
+            ImageAlert(
+                IMG, "httpd:2.4.49", ["web"], True, found, dict.fromkeys(found), update
+            )
+        )
+        alerter.add_update(IMG, "httpd:2.4.49", ["web"], update, found)
+        alerter.flush(state)
+        assert state.update(IMG)["notified"] == ("sha256:new" if ok else None)
+
+    urgent, normal, notice = notifier.calls
+
+    assert (
+        "⬆ httpd:2.4.69 fixes 1/2" in urgent["body"]
+        and "· KEV · EPSS 100% · RCE · ⬆ fixed" in urgent["body"]
+    )
+    assert "⬆" not in normal["body"]
+    assert (
+        notice["tag"] == "normal" and notice["title"] == "⬆ 1 fixing update available"
+    )
+    assert (
+        notice["body"] == "**httpd:2.4.49** (web) → httpd:2.4.69: fixes 1/3 (1 urgent)"
+    )
+    state.record_scan(
+        IMG, "httpd:2.4.49", ["web"], counts, found, update
+    )  # rescan keeps the mark
+    assert state.update(IMG)["notified"] == "sha256:new"
+    state.write_summary()
+
+    row = json.loads(state.summary_path.read_text())["images"][0]
+
+    assert row["update"] == {"ref": "httpd:2.4.69", "fixes": 1}

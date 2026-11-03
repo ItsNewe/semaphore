@@ -2,6 +2,7 @@
 
 Routing uses Apprise tags: APPRISE_URLS get "normal" (plus "urgent" when no
 APPRISE_URLS_URGENT is set), APPRISE_URLS_URGENT get "urgent"
+Fixing-update notices (see updates.py) go out as one more message, tagged "normal"
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ class ImageAlert:
     previous: dict[str, str | None] = field(
         default_factory=dict
     )  # alerted tier before this scan
+    update: dict | None = None  # best fixing candidate, see UpdateChecker.check
 
     def only(self, tier: str) -> ImageAlert | None:
         """This alert restricted to one tier's findings (None if it has none)"""
@@ -50,7 +52,14 @@ class ImageAlert:
             self.is_new_image,
             new,
             {k: self.previous.get(k) for k in new},
+            self.update,
         )
+
+    @property
+    def fixed(self) -> set[str]:
+        """Keys of the new findings the update fixes"""
+
+        return set(self.update["fixes"]) & self.new.keys() if self.update else set()
 
 
 def link(f: Finding) -> str:
@@ -98,7 +107,7 @@ def importance(f: Finding) -> tuple:
     return -f.kev, -(f.cls == "RCE"), -rank(f.severity), -(f.epss or 0), f.id or ""
 
 
-def describe(f: Finding, escalated: bool) -> str:
+def describe(f: Finding, escalated: bool, fixed: bool = False) -> str:
     fix = f" (fix: {f.fix})" if f.fix else ""
     tags = [
         t
@@ -107,6 +116,7 @@ def describe(f: Finding, escalated: bool) -> str:
             f"EPSS {f.epss:.0%}" if f.epss is not None and f.epss >= 0.01 else "",
             f.cls,
             "escalated" if escalated else "",
+            "⬆ fixed" if fixed else "",
         )
         if t
     ]
@@ -131,8 +141,9 @@ def summary(vulns: list[Finding]) -> str:
 
 class Alerter:
     def __init__(self, config: Config, notifier: apprise.Apprise | None = None) -> None:
-        self.config = config
         self.pending: list[ImageAlert] = []
+        self.updates: list[tuple[str, str]] = []  # (image_id, notice line)
+        self.config = config
         self.notifier = notifier
 
         if notifier is None and (config.apprise_urls or config.apprise_urls_urgent):
@@ -153,6 +164,28 @@ class Alerter:
     def add(self, alert: ImageAlert) -> None:
         self.pending.append(alert)
 
+    def add_update(
+        self,
+        image_id: str,
+        name: str,
+        containers: list[str],
+        update: dict,
+        found: dict[str, Finding],
+    ) -> None:
+        """Queues a notice for a fixing update not announced yet"""
+
+        fixes = set(update["fixes"]) & found.keys()
+        urgent = sum(found[k].tier == "urgent" for k in fixes)
+        where = ", ".join(containers) or "not running"
+
+        self.updates.append(
+            (
+                image_id,
+                f"**{name}** ({where}) → {update['ref']}: fixes {len(fixes)}/{len(found)}"
+                + (f" ({urgent} urgent)" if urgent else ""),
+            )
+        )
+
     def notify_started(self) -> None:
         if self.notifier is not None:
             self.notifier.notify(
@@ -162,7 +195,7 @@ class Alerter:
 
     def format(self, batch: list[ImageAlert], prefix: str = "") -> tuple[str, str]:
         max_lines = self.config.max_lines
-        grouped = []  # (item, [(merged finding, escalated)]) with one entry per vuln id
+        grouped = []  # (item, [(merged finding, escalated, fixed)]) with one entry per vuln id
 
         for item in batch:
             by_id: dict[str, list[str]] = {}
@@ -170,10 +203,12 @@ class Alerter:
             for k, f in item.new.items():
                 by_id.setdefault(f.id or k, []).append(k)
 
+            fixed = item.fixed
             vulns = [
                 (
                     merge([item.new[k] for k in keys]),
                     any(item.previous.get(k) is not None for k in keys),
+                    any(k in fixed for k in keys),
                 )
                 for keys in by_id.values()
             ]
@@ -201,8 +236,15 @@ class Alerter:
             lines.append(f"**{item.name}** ({where}){tag}")
             lines.append(summary([v[0] for v in vulns]))
 
-            for f, escalated in vulns[:max_lines]:
-                lines.append(describe(f, escalated))
+            fixed = item.fixed
+
+            if fixed:
+                lines.append(
+                    f"⬆ {item.update['ref']} fixes {len(fixed)}/{len(item.new)}"
+                )
+
+            for f, escalated, is_fixed in vulns[:max_lines]:
+                lines.append(describe(f, escalated, is_fixed))
 
             if len(vulns) > max_lines:
                 lines.append(f"- …and {len(vulns) - max_lines} more")
@@ -230,14 +272,16 @@ class Alerter:
         return "\n".join(body).strip()
 
     def flush(self, state: State) -> None:
-        """Sends one message per tier; on failure restores that tier's marks in state for a later retry"""
+        """Sends one message per tier, then the update notices. On failure restores that message's marks
+        in state for a later retry"""
 
-        if not self.pending:
+        if not self.pending and not self.updates:
             return
 
         batch, self.pending = self.pending, []
+        updates, self.updates = self.updates, []
 
-        for tier, (prefix, notify_type) in TIERS.items():
+        for tier, (prefix, _) in TIERS.items():
             items = [a for a in (item.only(tier) for item in batch) if a]
 
             if not items:
@@ -247,16 +291,7 @@ class Alerter:
 
             log.warning("%s\n%s", title, body)
 
-            if self.notifier is None or not any(self.notifier.find(tier)):
-                continue  # no destination for this tier: log only
-
-            if not self.notifier.notify(
-                title=title,
-                body=body,
-                body_format=apprise.NotifyFormat.MARKDOWN,
-                notify_type=notify_type,
-                tag=tier,
-            ):
+            if self.send(tier, title, body) is False:
                 log.error(
                     "%s notification failed; these findings will be re-alerted on the next rescan",
                     tier,
@@ -264,3 +299,33 @@ class Alerter:
 
                 for item in items:
                     state.rollback(item.image_id, item.previous)
+
+        if updates:
+            title = (
+                f"⬆ {plural(len(updates), 'fixing update', 'fixing updates')} available"
+            )
+            body = self.cap([line for _, line in updates])
+
+            log.warning("%s\n%s", title, body)
+
+            if self.send("normal", title, body) is False:
+                log.error(
+                    "update notification failed; it will be re-sent on the next rescan"
+                )
+            else:
+                for image_id, _ in updates:
+                    state.mark_update_notified(image_id)
+
+    def send(self, tier: str, title: str, body: str) -> bool | None:
+        """Notifies the targets routed to a tier. None when the tier has no destination (log only)"""
+
+        if self.notifier is None or not any(self.notifier.find(tier)):
+            return None
+
+        return self.notifier.notify(
+            title=title,
+            body=body,
+            body_format=apprise.NotifyFormat.MARKDOWN,
+            notify_type=TIERS[tier][1],
+            tag=tier,
+        )

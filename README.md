@@ -11,6 +11,7 @@ the **[Grype](https://github.com/anchore/grype)** vulnerability DB and alerts th
 | New container starts with an image not seen before | SBOM + scan ( through Docker events) |
 | Every 5 min | Reconcile pass, picks up anything the event stream missed |
 | Every 24 h | Grype DB refresh, stored SBOMs get re-matched, alerts for **new** CVEs |
+| Each scan of a vulnerable image | [Update check](#fixing-updates): newer upstream image that fixes its CVEs? |
 
 SBOMs are keyed by image ID so restarts and redeploys of the same image are noops.
 
@@ -30,6 +31,7 @@ SBOMs are keyed by image ID so restarts and redeploys of the same image are noop
 | `ALERT_MAX_LINES_PER_IMAGE` | `5` | CVE lines listed per image in an alert, most important first (KEV, RCE, severity, EPSS) |
 | `ALERT_MAX_CHARS` | `1800` | Body cap |
 | `PRUNE_REMOVED_IMAGES` | `true` | Prune SBOMs of deleted images |
+| `CHECK_UPDATES` | `true` | Look for a newer image that fixes the findings, see [Fixing updates](#fixing-updates) |
 | `LOG_LEVEL` | `INFO` | `DEBUG` shows Syft/Grype errors per reference |
 
 
@@ -58,6 +60,25 @@ in KEV. Set `SKIP_WONT_FIX=false` to alert on them too.
 
 Urgent messages use Apprise's `failure` type and a `🔴 URGENT` title. A finding already reported as normal is reported
 again once it becomes urgent, for example when it gets added to KEV.
+
+## Fixing updates
+
+For every image with alertable findings, semaphore looks for two candidates in the registry with
+[crane](https://github.com/google/go-containerregistry/tree/main/cmd/crane):
+
+- **rebuilt**: the running tag now points to a different digest upstream (e.g. `nginx:1.27` got a patched base)
+- **newer tag**: the highest tag in the same line with the same suffix, `1.27.3-alpine` → `1.27.5-alpine`,
+  `3.12-slim` → `3.14-slim`. Major bumps aren't suggested, and tags like `latest` only get the rebuild check
+
+Each candidate is SBOM'd straight from the registry (no `docker pull`), and its SBOM is cached by digest, so
+later checks only re-match it. The candidate fixing the most findings is kept. It shows up as:
+
+- a `⬆ nginx:1.27.5 fixes 7/9` line under the image in alerts, and `· ⬆ fixed` on each fixed finding
+- one `⬆ 1 fixing update available` message (normal tier), sent once per candidate digest
+- `update` in `summary.json`
+
+Images built locally (no registry digest) are skipped. For private registries, mount a Docker `config.json`
+and point `DOCKER_CONFIG` at its directory. crane and syft both read it.
 
 ## Ignoring CVEs
 

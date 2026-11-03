@@ -6,6 +6,9 @@ for every image that is actually running on this Docker host
   every RECONCILE_INTERVAL_SECONDS                    -> catch anything the event stream missed
   every RESCAN_INTERVAL_HOURS                         -> refresh Grype DB, re-match stored SBOMs
 
+Vulnerable images also get an update check on each scan: is the same tag rebuilt upstream, or is there
+a newer version tag, and which findings would it fix (updates.py)
+
 SBOMs are generated once per image ID. Vulnerability matching is re-run on the
 stored SBOMs, because new CVEs get published for images that never change
 
@@ -29,6 +32,7 @@ from .config import Config
 from .host import DockerHost
 from .scan import Scanner, parse_matches
 from .store import State
+from .updates import UpdateChecker
 from .util import hex_id, safe
 
 log = logging.getLogger("semaphore")
@@ -39,6 +43,7 @@ class Semaphore:
         self.config = config
         self.state = State(config.data_dir)
         self.scanner = Scanner(config)
+        self.updates = UpdateChecker(config, self.scanner)
         self.alerter = Alerter(config)
         self.tasks: queue.Queue[tuple] = queue.Queue()
         self.host: DockerHost | None = (
@@ -73,12 +78,26 @@ class Semaphore:
             self.config.epss_threshold,
             self.config.skip_wont_fix,
         )
+        update = None
+
+        if found and self.config.check_updates:
+            # Configured refs first: their tag may have moved to a newer pull since this container started
+            try:
+                update = self.updates.check(
+                    image_id, [*sorted(info.get("refs", ())), *refs], found
+                )
+            except RuntimeError as e:
+                log.warning("Update check failed for %s: %s", name, e)
+
+                update = self.state.update(image_id)  # keep the last known result
+
         before = self.state.alerted(image_id)
         new = self.state.new_findings(image_id, found)
         containers = sorted(info.get("containers", ()))
 
-        self.state.record_scan(image_id, name, containers, counts, found)
+        self.state.record_scan(image_id, name, containers, counts, found, update)
 
+        update = self.state.update(image_id)
         urgent = sum(f.tier == "urgent" for f in found.values())
 
         log.info(
@@ -87,6 +106,15 @@ class Semaphore:
             ", ".join(f"{n} {s}" for s, n in counts.items()) or "no vulnerabilities",
             f" ({urgent} urgent)" if urgent else "",
         )
+
+        if update:
+            log.info(
+                "Update for %s: %s fixes %d/%d",
+                name,
+                update["ref"],
+                len(update["fixes"]),
+                len(found),
+            )
 
         if new:
             self.alerter.add(
@@ -97,8 +125,12 @@ class Semaphore:
                     is_new,
                     new,
                     {k: before.get(k) for k in new},
+                    update,
                 )
             )
+
+        if update and update["notified"] != update["digest"]:
+            self.alerter.add_update(image_id, name, containers, update, found)
 
     def prune(self) -> None:
         for img_id in list(self.state.images):
@@ -130,6 +162,8 @@ class Semaphore:
 
             if self.config.prune_removed:
                 self.prune()
+
+            self.updates.prune()
 
             self.state.last_rescan = time.time()
         elif kind == "image":
