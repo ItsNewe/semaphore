@@ -1,0 +1,12 @@
+# Dev overlay: local build with ./src bind-mounted over the editable install, so code edits need no rebuild
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# Daemon edits: restart the semaphore service. TUI edits: `make tui` restarts it on save
+# Dependency changes (pyproject.toml, uv.lock) still need --build
+services:
+  semaphore:
+    build: .
+    image: semaphore:dev
+    environment:
+      PYTHONDONTWRITEBYTECODE: 1  # keep the container from writing __pycache__ into the host tree
+    volumes:
+      - ./src:/app/src
