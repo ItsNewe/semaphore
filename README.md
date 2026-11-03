@@ -27,7 +27,7 @@ SBOMs are keyed by image ID so restarts and redeploys of the same image are noop
 | `RESCAN_INTERVAL_HOURS` | `24` | Re-match SBOMs against a fresh DB |
 | `SCAN_ON_PULL` | `false` | Also react to `image pull` events |
 | `EXCLUDE_IMAGES` | – | Regex to filter image names |
-| `ALERT_MAX_LINES_PER_IMAGE` | `10` | CVE lines listed per image in an alert |
+| `ALERT_MAX_LINES_PER_IMAGE` | `5` | CVE lines listed per image in an alert, most important first (KEV, RCE, severity, EPSS) |
 | `ALERT_MAX_CHARS` | `1800` | Body cap |
 | `PRUNE_REMOVED_IMAGES` | `true` | Prune SBOMs of deleted images |
 | `LOG_LEVEL` | `INFO` | `DEBUG` shows Syft/Grype errors per reference |
@@ -48,7 +48,9 @@ All three come from Grype's own database, so no extra lookups are made. Alert li
 availability-only bugs:
 
 ```
-- CVE-2021-42013 [Critical] httpd 2.4.49 (no fix yet) · KEV · EPSS 100% · RCE
+**httpd:2.4.49** (web) · new image
+Critical: 1 | High: 2 | RCE: 1 | KEV: 1
+- [CVE-2021-42013](https://nvd.nist.gov/vuln/detail/CVE-2021-42013) [Critical] httpd 2.4.49 · KEV · EPSS 100% · RCE
 ```
 
 Findings the distro won't fix (Debian `no-dsa`/`ignored`, Grype fix state `wont-fix`) are not alerted unless they are

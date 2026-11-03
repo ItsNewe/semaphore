@@ -44,7 +44,7 @@ class Config:
     rescan_interval: float = 24 * 3600
     reconcile_interval: int = 300
     db_update_interval: float = 6 * 3600
-    max_lines: int = 10
+    max_lines: int = 5
     max_body: int = 1800
     syft_timeout: int = 1800
     grype_timeout: int = 600
@@ -86,7 +86,7 @@ class Config:
             rescan_interval=env_hours("RESCAN_INTERVAL_HOURS", 24),
             reconcile_interval=int(os.getenv("RECONCILE_INTERVAL_SECONDS", "300")),
             db_update_interval=env_hours("DB_UPDATE_INTERVAL_HOURS", 6),
-            max_lines=int(os.getenv("ALERT_MAX_LINES_PER_IMAGE", "10")),
+            max_lines=int(os.getenv("ALERT_MAX_LINES_PER_IMAGE", "5")),
             max_body=int(os.getenv("ALERT_MAX_CHARS", "1800")),
             syft_timeout=int(os.getenv("SYFT_TIMEOUT_SECONDS", "1800")),
             grype_timeout=int(os.getenv("GRYPE_TIMEOUT_SECONDS", "600")),
