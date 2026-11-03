@@ -3,7 +3,7 @@ from pathlib import Path
 
 from semaphore.alerts import Alerter, ImageAlert
 from semaphore.config import Config
-from semaphore.scan import exploit_class, parse_matches
+from semaphore.scan import Finding, exploit_class, parse_matches
 from semaphore.store import State
 
 # Trimmed real Grype 0.121 output: httpd:2.4.49 and python:3.8-slim-buster
@@ -182,9 +182,50 @@ def test_flush_sends_one_message_per_tier_and_rolls_back_failed_tier(tmp_path):
 
     assert urgent["title"].startswith("🔴 URGENT: 2 new vulnerabilities")
     assert "· KEV · EPSS 100% · RCE" in urgent["body"]
+    assert (
+        "[CVE-2021-42013](https://nvd.nist.gov/vuln/detail/CVE-2021-42013)"
+        in urgent["body"]
+    )
+    assert "| KEV: 1" in urgent["body"]
     assert "CVE-2021-39537" not in urgent["body"]
     assert state.alerted(IMG) == {PLAIN: "normal"}  # urgent ones un-marked for retry
     assert alerter.pending == []
+
+
+def test_format_groups_packages_and_puts_important_first():
+    new = {
+        "a": Finding("CVE-1", "Critical", "curl", "8.1", "", ""),
+        "b": Finding("CVE-1", "Critical", "libcurl4t64", "8.1", "", ""),
+        "c": Finding("CVE-2", "High", "pip", "23", "24", "", cls="RCE"),
+        "d": Finding(
+            "GHSA-x",
+            "Medium",
+            "lodash",
+            "4",
+            "",
+            "https://github.com/advisories/GHSA-x",
+            kev=True,
+        ),
+    }
+    title, body = Alerter(Config(), FakeNotifier()).format(
+        [ImageAlert(IMG, "img:1", ["c1"], False, new)]
+    )
+    lines = body.splitlines()
+
+    assert title == "3 new vulnerabilities (1 critical, 1 high, 1 medium) in 1 image"
+    assert lines[1] == "Critical: 1 | High: 1 | Medium: 1 | RCE: 1 | KEV: 1"
+    assert (
+        lines[2]
+        == "- [GHSA-x](https://github.com/advisories/GHSA-x) [Medium] lodash 4 · KEV"
+    )
+    assert (
+        lines[3]
+        == "- [CVE-2](https://nvd.nist.gov/vuln/detail/CVE-2) [High] pip 23 (fix: 24) · RCE"
+    )
+    assert (
+        lines[4]
+        == "- [CVE-1](https://nvd.nist.gov/vuln/detail/CVE-1) [Critical] curl, libcurl4t64 8.1"
+    )
 
 
 def test_default_routing_sends_urgent_to_main_urls():

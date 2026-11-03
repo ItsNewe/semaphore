@@ -53,8 +53,53 @@ class ImageAlert:
         )
 
 
+def link(f: Finding) -> str:
+    """Markdown link to the advisory: NVD for CVEs (short URL), else Grype's data source"""
+
+    url = (
+        f"https://nvd.nist.gov/vuln/detail/{f.id}"
+        if (f.id or "").startswith("CVE-")
+        else f.url
+    )
+
+    return f"[{f.id}]({url})" if url else f.id
+
+
+def merge(fs: list[Finding]) -> Finding:
+    """One finding per vuln id: packages joined, worst severity and EPSS, any KEV"""
+
+    versions = {f.version for f in fs}
+    pkgs = (
+        sorted({f.pkg for f in fs})
+        if len(versions) == 1
+        else sorted({f"{f.pkg} {f.version}" for f in fs})
+    )
+    epss = [f.epss for f in fs if f.epss is not None]
+
+    return Finding(
+        id=fs[0].id,
+        severity=max((f.severity for f in fs), key=rank),
+        pkg=", ".join(pkgs),
+        version=versions.pop() if len(versions) == 1 else "",
+        fix=", ".join(dict.fromkeys(f.fix for f in fs if f.fix)),
+        url=fs[0].url,
+        kev=any(f.kev for f in fs),
+        epss=max(epss, default=None),
+        cls="RCE"
+        if any(f.cls == "RCE" for f in fs)
+        else next((f.cls for f in fs if f.cls), ""),
+        tier=max((f.tier for f in fs), key=lambda t: t == "urgent"),
+    )
+
+
+def importance(f: Finding) -> tuple:
+    """Sort key, most important first: KEV, RCE, severity, EPSS"""
+
+    return -f.kev, -(f.cls == "RCE"), -rank(f.severity), -(f.epss or 0), f.id or ""
+
+
 def describe(f: Finding, escalated: bool) -> str:
-    fix = f"fix: {f.fix}" if f.fix else "no fix yet"
+    fix = f" (fix: {f.fix})" if f.fix else ""
     tags = [
         t
         for t in (
@@ -66,9 +111,22 @@ def describe(f: Finding, escalated: bool) -> str:
         if t
     ]
 
-    return f"- {f.id} [{f.severity}] {f.pkg} {f.version} ({fix})" + "".join(
-        f" · {t}" for t in tags
+    return (
+        f"- {link(f)} [{f.severity}] {f.pkg} {f.version}".rstrip()
+        + fix
+        + "".join(f" · {t}" for t in tags)
     )
+
+
+def summary(vulns: list[Finding]) -> str:
+    """Critical: x | High: y | RCE: n | KEV: n"""
+
+    sevs = Counter(f.severity for f in vulns)
+    parts = [f"{s}: {n}" for s, n in sorted(sevs.items(), key=lambda kv: -rank(kv[0]))]
+    rce, kev = sum(f.cls == "RCE" for f in vulns), sum(f.kev for f in vulns)
+    parts += [f"{label}: {n}" for label, n in (("RCE", rce), ("KEV", kev)) if n]
+
+    return " | ".join(parts)
 
 
 class Alerter:
@@ -103,8 +161,26 @@ class Alerter:
             )
 
     def format(self, batch: list[ImageAlert], prefix: str = "") -> tuple[str, str]:
-        max_lines, max_body = self.config.max_lines, self.config.max_body
-        totals = Counter(f.severity for item in batch for f in item.new.values())
+        max_lines = self.config.max_lines
+        grouped = []  # (item, [(merged finding, escalated)]) with one entry per vuln id
+
+        for item in batch:
+            by_id: dict[str, list[str]] = {}
+
+            for k, f in item.new.items():
+                by_id.setdefault(f.id or k, []).append(k)
+
+            vulns = [
+                (
+                    merge([item.new[k] for k in keys]),
+                    any(item.previous.get(k) is not None for k in keys),
+                )
+                for keys in by_id.values()
+            ]
+
+            grouped.append((item, sorted(vulns, key=lambda v: importance(v[0]))))
+
+        totals = Counter(v[0].severity for _, vulns in grouped for v in vulns)
         sev_txt = ", ".join(
             f"{n} {s.lower()}"
             for s, n in sorted(totals.items(), key=lambda kv: -rank(kv[0]))
@@ -116,30 +192,32 @@ class Alerter:
 
         lines: list[str] = []
 
-        for item in sorted(
-            batch, key=lambda i: -worst(f.severity for f in i.new.values())
+        for item, vulns in sorted(
+            grouped, key=lambda g: -worst(v[0].severity for v in g[1])
         ):
             where = ", ".join(item.containers) or "not running"
             tag = " · new image" if item.is_new_image else ""
 
             lines.append(f"**{item.name}** ({where}){tag}")
+            lines.append(summary([v[0] for v in vulns]))
 
-            findings = sorted(
-                item.new.items(), key=lambda kf: (-rank(kf[1].severity), kf[1].id or "")
-            )
+            for f, escalated in vulns[:max_lines]:
+                lines.append(describe(f, escalated))
 
-            for k, f in findings[:max_lines]:
-                lines.append(describe(f, escalated=item.previous.get(k) is not None))
-
-            if len(findings) > max_lines:
-                lines.append(f"- …and {len(findings) - max_lines} more")
+            if len(vulns) > max_lines:
+                lines.append(f"- …and {len(vulns) - max_lines} more")
 
             lines.append("")
+
+        return title, self.cap(lines)
+
+    def cap(self, lines: list[str]) -> str:
+        """Joins lines, truncated to ALERT_MAX_CHARS"""
 
         body, used = [], 0
 
         for i, line in enumerate(lines):
-            if used + len(line) + 1 > max_body:
+            if used + len(line) + 1 > self.config.max_body:
                 body.append(
                     f"…truncated ({len(lines) - i} more lines). Full reports: {self.config.report_dir}"
                 )
@@ -149,7 +227,7 @@ class Alerter:
 
             used += len(line) + 1
 
-        return title, "\n".join(body).strip()
+        return "\n".join(body).strip()
 
     def flush(self, state: State) -> None:
         """Sends one message per tier; on failure restores that tier's marks in state for a later retry"""
