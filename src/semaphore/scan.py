@@ -192,19 +192,12 @@ class Scanner:
             f"syft could not read image {hex_id(image_id)[:12]}: {last_err}"
         )
 
-    def grype_scan(self, image_id: str) -> dict:
-        """Matches the stored SBOM against the DB; saves and returns the raw report"""
+    def match(self, sbom: Path, only_fixed: bool) -> str:
+        """Raw Grype JSON for an SBOM file"""
 
-        cmd = [
-            "grype",
-            f"sbom:{self.artifact(image_id, 'syft.json')}",
-            "-o",
-            "json",
-            "-q",
-            "--by-cve",
-        ]
+        cmd = ["grype", f"sbom:{sbom}", "-o", "json", "-q", "--by-cve"]
 
-        if self.config.only_fixed:
+        if only_fixed:
             cmd.append("--only-fixed")
 
         if self.config.grype_config.is_file():
@@ -214,7 +207,13 @@ class Scanner:
             **os.environ,
             "GRYPE_DB_AUTO_UPDATE": "false",
         }  # DB is refreshed by ensure_db()
-        out = run_tool(cmd, self.config.grype_timeout, env=env)
+
+        return run_tool(cmd, self.config.grype_timeout, env=env)
+
+    def grype_scan(self, image_id: str) -> dict:
+        """Matches the stored SBOM against the DB; saves and returns the raw report"""
+
+        out = self.match(self.artifact(image_id, "syft.json"), self.config.only_fixed)
 
         self.artifact(image_id, "grype.json").write_text(out)
 

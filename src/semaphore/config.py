@@ -41,6 +41,7 @@ class Config:
     scan_on_pull: bool = False
     notify_on_start: bool = False
     prune_removed: bool = True
+    check_updates: bool = True
     rescan_interval: float = 24 * 3600
     reconcile_interval: int = 300
     db_update_interval: float = 6 * 3600
@@ -49,6 +50,7 @@ class Config:
     syft_timeout: int = 1800
     grype_timeout: int = 600
     db_update_timeout: int = 900
+    crane_timeout: int = 120
     grype_config: Path = Path("/config/grype.yaml")
     exclude: re.Pattern | None = None
 
@@ -83,6 +85,7 @@ class Config:
             scan_on_pull=env_bool("SCAN_ON_PULL"),
             notify_on_start=env_bool("NOTIFY_ON_START"),
             prune_removed=env_bool("PRUNE_REMOVED_IMAGES", True),
+            check_updates=env_bool("CHECK_UPDATES", True),
             rescan_interval=env_hours("RESCAN_INTERVAL_HOURS", 24),
             reconcile_interval=int(os.getenv("RECONCILE_INTERVAL_SECONDS", "300")),
             db_update_interval=env_hours("DB_UPDATE_INTERVAL_HOURS", 6),
@@ -90,6 +93,7 @@ class Config:
             max_body=int(os.getenv("ALERT_MAX_CHARS", "1800")),
             syft_timeout=int(os.getenv("SYFT_TIMEOUT_SECONDS", "1800")),
             grype_timeout=int(os.getenv("GRYPE_TIMEOUT_SECONDS", "600")),
+            crane_timeout=int(os.getenv("CRANE_TIMEOUT_SECONDS", "120")),
             grype_config=Path(os.getenv("GRYPE_CONFIG", "/config/grype.yaml")),
             exclude=re.compile(exclude) if exclude else None,
         )

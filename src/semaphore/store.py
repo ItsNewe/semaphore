@@ -56,6 +56,9 @@ class State:
             {
                 "image_id": k,
                 **{f: v.get(f) for f in ("name", "containers", "counts", "last_scan")},
+                "update": {"ref": u["ref"], "fixes": len(u["fixes"])}
+                if (u := v.get("update"))
+                else None,
             }
             for k, v in self.images.items()
         ]
@@ -100,10 +103,15 @@ class State:
         containers: list[str],
         counts: dict,
         found: dict[str, Finding],
+        update: dict | None = None,
     ) -> None:
-        """Stores the scan. Alerted tiers only go up, so an EPSS dipping and rising again doesn't re-alert"""
+        """Stores the scan. Alerted tiers only go up, so an EPSS dipping and rising again doesn't re-alert
+
+        update: best fixing candidate from UpdateChecker. Its "notified" digest carries over between scans
+        """
 
         before = self.alerted(image_id)
+        notified = (self.update(image_id) or {}).get("notified")
         self.images[image_id] = {
             "name": name,
             "containers": containers,
@@ -113,7 +121,15 @@ class State:
                 k: max(f.tier, before.get(k, "normal"), key=TIER_RANK.get)
                 for k, f in found.items()
             },
+            "update": {**update, "notified": notified} if update else None,
         }
+
+    def update(self, image_id: str) -> dict | None:
+        return self.images.get(image_id, {}).get("update")
+
+    def mark_update_notified(self, image_id: str) -> None:
+        if u := self.update(image_id):
+            u["notified"] = u["digest"]
 
     def rollback(self, image_id: str, previous: dict[str, str | None]) -> None:
         """Restores alert marks after a failed send (None = never alerted), so the next rescan retries"""
