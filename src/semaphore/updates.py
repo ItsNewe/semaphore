@@ -11,7 +11,7 @@ import re
 import time
 
 from .config import Config
-from .scan import Finding, Scanner
+from .scan import Finding, Scanner, parse_matches
 from .util import hex_id, now_iso, run_tool
 
 log = logging.getLogger("semaphore")
@@ -170,7 +170,8 @@ class UpdateChecker:
 
         for label, pull, digest in self.candidates(ref, digests):
             try:
-                fixes = fixed_by(found, self.scan(pull, digest))
+                report = self.scan(pull, digest)
+                fixes = fixed_by(found, report)
             except (RuntimeError, OSError, ValueError) as e:
                 log.warning("Could not scan update candidate %s: %s", pull, e)
                 continue
@@ -182,6 +183,13 @@ class UpdateChecker:
                     "digest": digest,
                     "fixes": sorted(fixes),
                     "checked": now_iso(),
+                    # candidate is matched without --only-fixed, comparable to the image's counts only with ONLY_FIXED off
+                    "counts": parse_matches(
+                        report,
+                        self.config.min_rank,
+                        self.config.epss_threshold,
+                        self.config.skip_wont_fix,
+                    )[1],
                 }
 
         return best

@@ -322,7 +322,7 @@ class Alerter:
                 for image_id, _ in updates:
                     state.mark_update_notified(image_id)
 
-        state.meta["last_batch"] = {"sent": now_iso(), "messages": messages}
+        state.last_batch = {"sent": now_iso(), "messages": messages}
 
     def send(self, tier: str, title: str, body: str) -> bool | None:
         """Notifies the targets routed to a tier. None when the tier has no destination (log only)"""

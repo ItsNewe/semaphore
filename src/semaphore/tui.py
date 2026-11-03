@@ -1,4 +1,7 @@
-"""Terminal UI to edit settings.json (tier rules and Apprise targets), re-send the last batch and send test alerts
+"""Terminal UI to edit settings.json (tier rules and Apprise targets), list scanned images, request rescans,
+re-send the last batch and send test alerts
+
+Reads semaphore.db read-only. Rescans are requested through <data_dir>/rescan.json, picked up by the daemon
 
 Run inside the container: docker exec -it semaphore semaphore-tui
 The daemon picks up saved settings before its next task, no restart needed
@@ -11,16 +14,20 @@ import json
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
+from typing import ClassVar
 
 import apprise
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
     Checkbox,
+    DataTable,
     Footer,
     Header,
     Input,
@@ -36,6 +43,7 @@ from .alerts import TIERS, Alerter, ImageAlert
 from .config import SEV_RANK, Config
 from .scan import Finding
 from .store import State
+from .util import plural, rank
 
 SEVERITIES = list(reversed(SEV_RANK))  # critical first
 RELOAD = "reload"  # App.run() result asking main() to restart with fresh code
@@ -48,7 +56,9 @@ def source_mtimes() -> dict[Path, float]:
 class Dropdown(Select, inherit_bindings=False):
     """Select that opens on enter/space only, so arrow keys stay free to move between fields"""
 
-    BINDINGS = [Binding("enter,space", "show_overlay", "Open", show=False)]
+    BINDINGS: ClassVar[list] = [
+        Binding("enter,space", "show_overlay", "Open", show=False)
+    ]
 
 
 class Checklist(SelectionList):
@@ -89,15 +99,70 @@ class TargetRow(Horizontal):
         ]
 
 
+def short_counts(counts: dict) -> str:
+    """{"High": 5, "Critical": 3} -> C:3 | H:5"""
+
+    return (
+        " | ".join(
+            f"{s[0]}:{n}"
+            for s, n in sorted(counts.items(), key=lambda kv: -rank(kv[0]))
+            if n
+        )
+        or "clean"
+    )
+
+
+def local_time(iso: str | None) -> str:
+    return (
+        datetime.fromisoformat(iso).astimezone().strftime("%Y-%m-%d %H:%M")
+        if iso
+        else "—"
+    )
+
+
+class Confirm(ModalScreen[bool]):
+    """Yes/no dialog, Cancel focused first and escape cancels"""
+
+    AUTO_FOCUS = "#no"
+
+    BINDINGS: ClassVar[list] = [("escape", "dismiss(False)", "Cancel")]
+
+    DEFAULT_CSS = """
+    Confirm { align: center middle; }
+    Confirm > Vertical { width: 70; height: auto; border: thick $error; background: $surface; padding: 1 2; }
+    Confirm Horizontal { height: auto; margin-top: 1; }
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+
+        self.message = message
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(self.message)
+
+            with Horizontal():
+                yield Button("Discard and rescan", variant="error", id="yes")
+                yield Button("Cancel", id="no")
+
+    @on(Button.Pressed)
+    def answer(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss(event.button.id == "yes")
+
+
 class SemaphoreTUI(App):
     TITLE = "sémaphore"
-    BINDINGS = [
+
+    BINDINGS: ClassVar[list] = [
         ("ctrl+s", "save", "Save settings"),
         Binding("ctrl+c", "ctrl_c", show=False, priority=True),
         # Focused widgets that use arrows themselves (Input, tabs, open dropdowns) take precedence
         Binding("down,right", "focus_next", show=False),
         Binding("up,left", "focus_previous", show=False),
     ]
+
     CSS = """
     TabPane { overflow-y: auto; }
     TabPane > * { margin-bottom: 1; }
@@ -107,6 +172,9 @@ class SemaphoreTUI(App):
     .setting > Label { width: 1fr; height: 3; content-align: left middle; }
     .setting > Dropdown, .setting > Input, .setting > Checklist { width: 28; }
     #test-severities { height: auto; }
+    #image-table { height: auto; max-height: 24; }
+    Button { min-width: 0; height: 1; padding: 0; margin-right: 1; border: none !important; }
+    Button:last-child { margin-right: 0; }
     TabPane > Button { margin-top: 1; }
     """
 
@@ -116,6 +184,7 @@ class SemaphoreTUI(App):
         self.base = Config.from_env()
         self.config = self.base.apply_settings()
         self.last_ctrl_c = 0.0
+        self.selected: set[str] = set()  # image ids ticked in the Images tab
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -152,16 +221,23 @@ class SemaphoreTUI(App):
                     yield Button("Add target", id="add")
                     yield Button("Save", variant="primary", classes="save")
 
+            with TabPane("Images", id="images"):
+                yield Label("Enter or click ticks an image")
+                yield DataTable(id="image-table", cursor_type="row")
+
+                with Horizontal(classes="target"):
+                    yield Button(
+                        "Rescan selected", variant="warning", id="rescan-selected"
+                    )
+                    yield Button("Rescan all", variant="error", id="rescan-all")
+                    yield Button("Refresh", id="refresh-images")
+
             with TabPane("Resend", id="resend"):
                 yield Static(id="last-batch")
 
                 with Horizontal(classes="target"):
                     yield Button("Re-send", variant="warning", id="resend-btn")
                     yield Button("Refresh", id="refresh")
-
-            with TabPane("Updates", id="updates"):
-                yield Static(id="update-list")
-                yield Button("Refresh", id="refresh-updates")
 
             with TabPane("Test", id="test"):
                 with Horizontal(classes="setting"):
@@ -203,8 +279,12 @@ class SemaphoreTUI(App):
         self.notify("Press ctrl+c again to quit", timeout=1)
 
     def on_mount(self) -> None:
+        table = self.query_one("#image-table", DataTable)
+
+        table.add_column("✓", key="sel")
+        table.add_columns("Image", "Scanned", "Findings", "Update", "After update")
+        self.show_images()
         self.show_last_batch()
-        self.show_updates()
 
         if os.getenv("TUI_RELOAD"):
             self.mtimes = source_mtimes()
@@ -270,14 +350,89 @@ class SemaphoreTUI(App):
 
         self.notify(f"Saved {path}")
 
+    # ------------------------------------------------------------ images
+
+    @on(Button.Pressed, "#refresh-images")
+    def show_images(self) -> None:
+        table = self.query_one("#image-table", DataTable)
+        rows = State(self.base.data_dir, readonly=True).rows()
+        self.selected &= {r["id"] for r in rows}
+
+        table.clear()
+
+        for r in rows:
+            u = r["update"]
+
+            table.add_row(
+                "✓" if r["id"] in self.selected else "",
+                r["name"] or r["id"],
+                local_time(r["last_scan"]),
+                short_counts(r["counts"] or {}),
+                f"{u['ref']} (fixes {len(u['fixes'])})" if u else "—",
+                (short_counts(u["counts"]) if "counts" in u else "?") if u else "",
+                key=r["id"],
+            )
+
+    @on(DataTable.RowSelected, "#image-table")
+    def toggle_image(self, event: DataTable.RowSelected) -> None:
+        img_id = event.row_key.value
+        self.selected ^= {img_id}
+
+        event.data_table.update_cell(
+            event.row_key, "sel", "✓" if img_id in self.selected else ""
+        )
+
+    @on(Button.Pressed, "#rescan-selected")
+    def rescan_selected(self) -> None:
+        if not self.selected:
+            self.notify("Tick images first (enter or click)", severity="warning")
+
+            return
+
+        self.confirm_rescan(sorted(self.selected))
+
+    @on(Button.Pressed, "#rescan-all")
+    def rescan_all(self) -> None:
+        self.confirm_rescan(None)
+
+    def confirm_rescan(self, ids: list[str] | None) -> None:
+        what = "every image" if ids is None else plural(len(ids), "image", "images")
+
+        def done(yes: bool | None) -> None:
+            if yes:
+                self.request_rescan(ids)
+
+        self.push_screen(
+            Confirm(
+                f"Discard the SBOMs, scan results and alert history of {what} and rescan from scratch?\n\n"
+                "Every current finding will be alerted again."
+            ),
+            done,
+        )
+
+    def request_rescan(self, ids: list[str] | None) -> None:
+        """Writes rescan.json, merged with a request the daemon hasn't picked up yet. None = all images"""
+
+        path = self.base.rescan_path
+
+        try:
+            pending = json.loads(path.read_text())["images"]
+        except (OSError, ValueError, KeyError, TypeError):
+            pending = []
+
+        images = None if ids is None or pending is None else sorted({*pending, *ids})
+        tmp = path.with_suffix(".tmp")
+
+        tmp.write_text(json.dumps({"images": images}))
+        tmp.replace(path)
+        self.selected.clear()
+        self.show_images()
+        self.notify("Rescan requested, the daemon starts it within seconds")
+
     # ------------------------------------------------------------ sending
 
     def show_last_batch(self) -> None:
-        state = State(self.base.data_dir)
-
-        state.load()
-
-        batch = state.meta.get("last_batch")
+        batch = State(self.base.data_dir, readonly=True).last_batch
         text = (
             f"Last batch, {batch['sent']}:\n"
             + "\n".join(f"  [{m['tier']}] {m['title']}" for m in batch["messages"])
@@ -291,31 +446,11 @@ class SemaphoreTUI(App):
     def refresh_batch(self) -> None:
         self.show_last_batch()
 
-    @on(Button.Pressed, "#refresh-updates")
-    def show_updates(self) -> None:
-        state = State(self.base.data_dir)
-
-        state.load()
-
-        lines = [
-            f"  {img.get('name')} → {u['ref']}: fixes {len(u['fixes'])} (checked {u['checked']})"
-            for img in state.images.values()
-            if (u := img.get("update"))
-        ]
-
-        self.query_one("#update-list", Static).update(
-            "Images with a fixing update:\n" + "\n".join(sorted(lines))
-            if lines
-            else "No fixing update found for any vulnerable image"
-        )
-
     @on(Button.Pressed, "#resend-btn")
     def resend(self) -> None:
-        state = State(self.base.data_dir)
-
-        state.load()
-
-        messages = (state.meta.get("last_batch") or {}).get("messages")
+        messages = (State(self.base.data_dir, readonly=True).last_batch or {}).get(
+            "messages"
+        )
 
         if not messages:
             self.notify("Nothing to re-send", severity="warning")

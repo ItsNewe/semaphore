@@ -5,6 +5,7 @@ for every image that is actually running on this Docker host
   container `start` event (optionally image `pull`)  -> unseen image? -> SBOM + scan
   every RECONCILE_INTERVAL_SECONDS                    -> catch anything the event stream missed
   every RESCAN_INTERVAL_HOURS                         -> refresh Grype DB, re-match stored SBOMs
+  <data_dir>/rescan.json written by the TUI            -> discard scans + alert marks, rescan as new
 
 Vulnerable images also get an update check on each scan: is the same tag rebuilt upstream, or is there
 a newer version tag, and which findings would it fix (updates.py)
@@ -15,12 +16,13 @@ stored SBOMs, because new CVEs get published for images that never change
 Alerts only cover findings not yet reported for that image or escalated to urgent since
 They're batched into one message per tier: urgent (KEV, EPSS >= threshold, likely RCE) and normal
 
-Threads: the event watcher and the scheduler only enqueue tasks; the worker
+Threads: the event watcher, the scheduler and the request watcher only enqueue tasks; the worker
 thread is the only one touching State and Alerter, so no locking is needed
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -137,18 +139,34 @@ class Semaphore:
             self.alerter.add_update(image_id, name, containers, update, found)
 
     def prune(self) -> None:
-        for img_id in list(self.state.images):
+        for img_id in self.state.ids():
             if self.host.has_image(img_id):
                 continue
 
-            img = self.state.forget(img_id)
-
             log.info(
-                "Image %s no longer on host, removing its SBOM/report", img.get("name")
+                "Image %s no longer on host, removing its SBOM/report",
+                self.state.forget(img_id),
             )
 
             for p in self.scanner.artifacts(img_id):
                 p.unlink(missing_ok=True)
+
+    def discard(self, ids: list[str] | None) -> None:
+        """Forgets scans, SBOMs and alert marks, then rescans the running ones as new. ids None = every image"""
+
+        running = self.host.running_images()
+        targets = set(self.state.ids()) | set(running) if ids is None else ids
+
+        log.info("Discarding the scans of %d image(s), rescanning them", len(targets))
+
+        for img_id in targets:
+            self.state.forget(img_id)
+
+            for p in self.scanner.artifacts(img_id):
+                p.unlink(missing_ok=True)
+
+            if img_id in running:
+                safe(self.process_image, img_id, running[img_id])
 
     def scan_running(self, rescan: bool = False) -> None:
         for img_id, info in self.host.running_images().items():
@@ -170,6 +188,8 @@ class Semaphore:
             self.updates.prune()
 
             self.state.last_rescan = time.time()
+        elif kind == "discard":
+            self.discard(task[1])
         elif kind == "image":
             _, img_id, hint = task
             info = self.host.running_images().get(img_id) or {
@@ -250,11 +270,35 @@ class Semaphore:
 
             time.sleep(5)
 
-    def scheduler(self) -> None:
-        """Queues a reconcile every reconcile_interval and a rescan when one is due
-        The rescan check runs before the first sleep, so an overdue rescan starts right away"""
+    def check_requests(self) -> None:
+        """Queues a discard task for the TUI's rescan.json. Renamed before reading so a request written meanwhile isn't lost"""
 
-        next_rescan = self.state.last_rescan + self.config.rescan_interval
+        path = self.base.rescan_path
+        taken = path.with_suffix(".taken")
+
+        try:
+            path.rename(taken)
+        except FileNotFoundError:
+            return
+
+        try:
+            self.tasks.put(("discard", json.loads(taken.read_text())["images"]))
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            log.warning("Ignoring rescan request %s: %s", path, e)
+
+        taken.unlink(missing_ok=True)
+
+    def watch_requests(self) -> None:
+        while True:
+            safe(self.check_requests)
+            time.sleep(2)
+
+    def scheduler(self, last_rescan: float) -> None:
+        """Queues a reconcile every reconcile_interval and a rescan when one is due
+        The rescan check runs before the first sleep, so an overdue rescan starts right away
+        last_rescan is passed in: the State connection belongs to the worker thread"""
+
+        next_rescan = last_rescan + self.config.rescan_interval
 
         while True:
             if time.time() >= next_rescan:
@@ -271,7 +315,6 @@ class Semaphore:
         for d in (cfg.sbom_dir, cfg.report_dir):
             d.mkdir(parents=True, exist_ok=True)
 
-        self.state.load()
         log.info(
             "semaphore starting: min severity=%s, urgent at EPSS>=%s/KEV/RCE, only fixed=%s, "
             "skip won't-fix=%s, rescan every %.0fh, pull events=%s",
@@ -307,7 +350,10 @@ class Semaphore:
 
         self.tasks.put(("reconcile",))
         threading.Thread(target=self.watch_events, daemon=True).start()
-        threading.Thread(target=self.scheduler, daemon=True).start()
+        threading.Thread(
+            target=self.scheduler, args=(self.state.last_rescan,), daemon=True
+        ).start()
+        threading.Thread(target=self.watch_requests, daemon=True).start()
         self.worker()
 
 

@@ -80,6 +80,12 @@ class Config:
     def settings_path(self) -> Path:
         return self.data_dir / "settings.json"
 
+    @property
+    def rescan_path(self) -> Path:
+        """Rescan request written by the TUI: {"images": [image ids] or null for all}"""
+
+        return self.data_dir / "rescan.json"
+
     def apply_settings(self) -> Config:
         """This config overridden by <data_dir>/settings.json (written by the TUI). Unusable file = no override"""
 

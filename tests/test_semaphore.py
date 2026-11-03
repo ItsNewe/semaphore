@@ -110,7 +110,7 @@ def test_exploit_class_dos_from_cvss_vector_only():
     )
 
 
-def test_state_round_trip_and_legacy_migration(tmp_path):
+def test_state_round_trip_and_uncommitted_batch_is_lost(tmp_path):
     found, counts = parse()
     s = State(tmp_path)
 
@@ -119,26 +119,62 @@ def test_state_round_trip_and_legacy_migration(tmp_path):
     s.last_rescan = 123.0
 
     s.save()
+    s.forget(IMG)  # not committed: a crash mid-batch keeps the last saved state
 
-    s2 = State(tmp_path)
+    s2 = State(tmp_path, readonly=True)
 
-    s2.load()
     assert s2.alerted(IMG) == {k: f.tier for k, f in found.items()}
     assert s2.last_rescan == 123.0
+    assert s2.rows()[0]["containers"] == ["c1"] and s2.rows()[0]["counts"] == counts
+    assert State(tmp_path / "missing", readonly=True).rows() == []
+
+
+def test_legacy_state_json_is_imported_once(tmp_path):
     (tmp_path / "state.json").write_text(
-        json.dumps({"images": {IMG: {"alerted": [PLAIN]}}, "meta": {}})
+        json.dumps(
+            {
+                "images": {IMG: {"name": "img:1", "alerted": [PLAIN]}},
+                "meta": {"last_rescan": 5.0},
+            }
+        )
     )
 
-    s3 = State(tmp_path)
+    s = State(tmp_path)
 
-    s3.load()
-    assert s3.alerted(IMG) == {PLAIN: "normal"}
+    assert s.alerted(IMG) == {PLAIN: "normal"} and s.last_rescan == 5.0
+    assert (tmp_path / "state.json.imported").exists()
+    assert not (tmp_path / "state.json").exists()
+
+
+def test_scan_log_records_added_and_removed_findings(tmp_path):
+    found, counts = parse()
+    s = State(tmp_path)
+    fewer = {k: f for k, f in found.items() if k != PLAIN}
+
+    s.record_scan(IMG, "img:1", [], counts, found)
+    first_seen = s.db.execute("SELECT first_seen FROM findings WHERE key = ?", (KEV,))
+    first_seen = first_seen.fetchone()[0]
+    s.db.execute("UPDATE findings SET first_seen = 'earlier'")
+    s.record_scan(IMG, "img:1", [], counts, fewer)
+
+    log = s.db.execute("SELECT added, removed FROM scans ORDER BY rowid").fetchall()
+
+    assert first_seen
+    assert [(json.loads(a), json.loads(r)) for a, r in log] == [
+        (sorted(found), []),
+        ([], [PLAIN]),
+    ]
+    assert s.db.execute("SELECT DISTINCT first_seen FROM findings").fetchall() == [
+        ("earlier",)
+    ]  # carried over
 
 
 def test_escalation_counts_as_new_but_not_downgrade(tmp_path):
     found, counts = parse()
     s = State(tmp_path)
-    s.images[IMG] = {"alerted": {k: "normal" for k in found}}
+
+    s.record_scan(IMG, "img:1", [], counts, found)
+    s.db.execute("UPDATE findings SET alerted = 'normal'")
 
     assert set(s.new_findings(IMG, found)) == {KEV, DOS}  # escalated to urgent
     s.record_scan(IMG, "img:1", [], counts, found)
@@ -191,7 +227,7 @@ def test_flush_sends_one_message_per_tier_and_rolls_back_failed_tier(tmp_path):
     assert state.alerted(IMG) == {PLAIN: "normal"}  # urgent ones un-marked for retry
     assert alerter.pending == []
 
-    batch = state.meta["last_batch"]["messages"]
+    batch = state.last_batch["messages"]
 
     assert [m["tier"] for m in batch] == ["urgent", "normal"] and batch[0][
         "title"
@@ -436,6 +472,10 @@ def test_update_check_scans_newer_tag_once_and_reports_fixes(tmp_path, monkeypat
         "httpd@sha256:new",
         [KEV],
     )
+    assert (
+        u["counts"]
+        == parse_matches(candidate_without_kev(), cfg.min_rank, cfg.epss_threshold)[1]
+    )  # summary if the update is applied
     checker.check("sha256:abc123", refs, found)
     assert calls.count(["syft", "scan"]) == 1  # SBOM cached by digest
     assert (
@@ -497,3 +537,88 @@ def test_update_shows_in_alert_and_notice_retries_until_sent(tmp_path):
     row = json.loads(state.summary_path.read_text())["images"][0]
 
     assert row["update"] == {"ref": "httpd:2.4.69", "fixes": 1}
+
+
+def test_rescan_request_discards_and_rescans_running_images(tmp_path):
+    from semaphore.app import Semaphore
+
+    found, counts = parse()
+    sem = Semaphore(Config(data_dir=tmp_path))
+    running = {"sha256:run": {"containers": {"web"}, "refs": {"web:1"}}}
+    rescanned = []
+
+    class Host:
+        def running_images(self):
+            return running
+
+    sem.host = Host()
+    sem.process_image = lambda img_id, info, **kw: rescanned.append(img_id)
+    sem.config.sbom_dir.mkdir()
+
+    sbom = sem.scanner.artifact(IMG, "syft.json")
+
+    sbom.write_text("{}")
+    sem.state.record_scan(IMG, "img:1", [], counts, found)
+    sem.config.rescan_path.write_text(json.dumps({"images": [IMG]}))
+    sem.check_requests()
+    assert not sem.config.rescan_path.exists()
+    sem.handle(sem.tasks.get_nowait())
+    assert IMG not in sem.state and not sbom.exists() and rescanned == []
+
+    sem.state.record_scan(IMG, "img:1", [], counts, found)
+    sem.handle(("discard", None))  # all: stored and running images
+    assert IMG not in sem.state and rescanned == ["sha256:run"]
+
+
+def test_tui_lists_images_and_requests_rescan_after_confirm(tmp_path, monkeypatch):
+    import asyncio
+
+    from semaphore.tui import Confirm, SemaphoreTUI
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    found, counts = parse()
+    state = State(tmp_path)
+    update = {
+        "ref": "httpd:2.4.69",
+        "pull": "httpd@sha256:new",
+        "digest": "sha256:new",
+        "fixes": [KEV],
+        "checked": "now",
+        "counts": {"High": 2, "Medium": 1},
+    }
+
+    state.record_scan(IMG, "httpd:2.4.49", ["web"], counts, found, update)
+    state.save()
+
+    async def run():
+        app = SemaphoreTUI()
+
+        async with app.run_test() as pilot:
+            table = app.query_one("#image-table")
+            row = table.get_row(IMG)
+
+            assert row[1] == "httpd:2.4.49" and row[3].startswith("C:")
+            assert row[4] == "httpd:2.4.69 (fixes 1)" and row[5] == "H:2 | M:1"
+
+            app.query_one("TabbedContent").active = "images"
+            await pilot.pause()
+            table.focus()
+            await pilot.press("enter")  # tick the row
+            assert app.selected == {IMG}
+
+            app.rescan_selected()
+            await pilot.pause()
+            assert isinstance(app.screen, Confirm)
+            await pilot.press("enter")  # Cancel has focus
+            await pilot.pause()
+            assert not app.config.rescan_path.exists()
+
+            app.rescan_selected()
+            await pilot.pause()
+            await pilot.click("#yes")
+            await pilot.pause()
+
+    asyncio.run(run())
+
+    assert json.loads((tmp_path / "rescan.json").read_text()) == {"images": [IMG]}

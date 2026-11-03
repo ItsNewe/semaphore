@@ -75,7 +75,7 @@ later checks only re-match it. The candidate fixing the most findings is kept. I
 
 - a `⬆ nginx:1.27.5 fixes 7/9` line under the image in alerts, and `· ⬆ fixed` on each fixed finding
 - one `⬆ 1 fixing update available` message (normal tier), sent once per candidate digest
-- `update` in `summary.json`, and the **Updates** tab of the TUI
+- `update` in `summary.json`, and the **Images** tab of the TUI, with the severity counts once applied
 
 Images built locally (no registry digest) are skipped. For private registries, mount a Docker `config.json`
 and point `DOCKER_CONFIG` at its directory. crane and syft both read it.
@@ -89,7 +89,9 @@ docker exec -it semaphore semaphore-tui
 - **Tiers**: `MIN_SEVERITY` and `EPSS_THRESHOLD`
 - **Targets**: Apprise URLs and which tiers (urgent, normal) each one receives
 - **Resend**: re-sends the latest notification batch to the saved targets
-- **Updates**: images with a fixing update and what it fixes
+- **Images**: every scanned image with its scan time, counts (`C:2 | H:5`), fixing update and counts once applied.
+  **Rescan selected** / **Rescan all** (after a confirmation) discard the SBOMs, results and alert history, so the
+  daemon rescans them as new within seconds and alerts every current finding again
 - **Test**: sends a fake alert with the chosen severities and tier
 
 Saving (`ctrl+s`) writes `/data/settings.json`, which overrides the matching env vars. The daemon picks it up at its next task (at most `RECONCILE_INTERVAL_SECONDS`, 5 min),
