@@ -121,3 +121,11 @@ uv run pytest           # tests
 uv run semaphore        # run locally (needs syft, grype and DOCKER_HOST)
 uv run semaphore-tui    # TUI against DATA_DIR
 ```
+
+In Docker with `./src` bind-mounted (edits apply on restart, no rebuild):
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+docker compose -f docker-compose.yml -f docker-compose.dev.yml restart semaphore   # after daemon edits
+docker compose -f docker-compose.yml -f docker-compose.dev.yml exec semaphore semaphore-tui
+```
