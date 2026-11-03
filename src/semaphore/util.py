@@ -1,4 +1,5 @@
 """Helper functions"""
+
 from __future__ import annotations
 
 import logging
@@ -24,6 +25,7 @@ def rank(sev: str) -> int:
 
 def worst(sevs) -> int:
     """Highest severity rank in an iterable of severity names (0 if empty)"""
+
     return max((rank(s) for s in sevs), default=0)
 
 
@@ -33,12 +35,17 @@ def plural(n: int, one: str, many: str) -> str:
 
 def run_tool(cmd: list[str], timeout: int, **kwargs) -> str:
     """Runs a CLI tool and returns its stdout. Raises RuntimeError on failure or timeout"""
+
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kwargs)
+        r = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, **kwargs
+        )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"{cmd[0]} timed out after {timeout}s") from None
+
     if r.returncode != 0:
         raise RuntimeError(f"{cmd[0]} failed: {(r.stderr or r.stdout).strip()[-500:]}")
+
     return r.stdout
 
 

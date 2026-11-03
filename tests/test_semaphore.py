@@ -8,8 +8,12 @@ from semaphore.store import State
 
 # Trimmed real Grype 0.121 output: httpd:2.4.49 and python:3.8-slim-buster
 SAMPLE = json.loads((Path(__file__).parent / "grype_sample.json").read_text())
-KEV, DOS, RCE_MEDIUM, PLAIN = ("CVE-2021-42013|httpd|2.4.49", "CVE-2023-50387|libsystemd0|241-7~deb10u9",
-                               "CVE-2023-5752|pip|23.0.1", "CVE-2021-39537|libncursesw6|6.1+20181013-2+deb10u3")
+KEV, DOS, RCE_MEDIUM, PLAIN = (
+    "CVE-2021-42013|httpd|2.4.49",
+    "CVE-2023-50387|libsystemd0|241-7~deb10u9",
+    "CVE-2023-5752|pip|23.0.1",
+    "CVE-2021-39537|libncursesw6|6.1+20181013-2+deb10u3",
+)
 IMG = "sha256:abc"
 
 
@@ -19,7 +23,9 @@ def parse(cfg=Config()):
 
 def test_parse_matches_tiers():
     found, counts = parse()
+
     assert counts == {"Critical": 1, "High": 2, "Medium": 2}
+
     # CVE-2022-4415 (Medium, nothing urgent) is dropped; CVE-2023-5752 (Medium, CWE-77) is kept as urgent
     assert set(found) == {KEV, DOS, RCE_MEDIUM, PLAIN}
     assert (found[KEV].kev, found[KEV].tier) == (True, "urgent")
@@ -30,28 +36,53 @@ def test_parse_matches_tiers():
 
 def test_epss_threshold_is_configurable():
     found, _ = parse(Config(epss_threshold=1.0))
+
     assert found[DOS].tier == "normal"
 
 
 def test_exploit_class_dos_from_cvss_vector_only():
-    assert exploit_class({"cvss": [{"vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"}]}, []) == "DoS"
-    assert exploit_class({"cvss": [{"vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H"}]}, []) == "DoS"
-    assert exploit_class({"cvss": [{"vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]}, []) == ""
+    assert (
+        exploit_class(
+            {"cvss": [{"vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"}]}, []
+        )
+        == "DoS"
+    )
+    assert (
+        exploit_class(
+            {"cvss": [{"vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H"}]},
+            [],
+        )
+        == "DoS"
+    )
+    assert (
+        exploit_class(
+            {"cvss": [{"vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]}, []
+        )
+        == ""
+    )
 
 
 def test_state_round_trip_and_legacy_migration(tmp_path):
     found, counts = parse()
     s = State(tmp_path)
+
     s.record_scan(IMG, "img:1", ["c1"], counts, found)
+
     s.last_rescan = 123.0
+
     s.save()
+
     s2 = State(tmp_path)
+
     s2.load()
     assert s2.alerted(IMG) == {k: f.tier for k, f in found.items()}
     assert s2.last_rescan == 123.0
+    (tmp_path / "state.json").write_text(
+        json.dumps({"images": {IMG: {"alerted": [PLAIN]}}, "meta": {}})
+    )
 
-    (tmp_path / "state.json").write_text(json.dumps({"images": {IMG: {"alerted": [PLAIN]}}, "meta": {}}))
     s3 = State(tmp_path)
+
     s3.load()
     assert s3.alerted(IMG) == {PLAIN: "normal"}
 
@@ -60,12 +91,20 @@ def test_escalation_counts_as_new_but_not_downgrade(tmp_path):
     found, counts = parse()
     s = State(tmp_path)
     s.images[IMG] = {"alerted": {k: "normal" for k in found}}
-    assert set(s.new_findings(IMG, found)) == {KEV, DOS, RCE_MEDIUM}  # escalated to urgent
 
+    assert set(s.new_findings(IMG, found)) == {
+        KEV,
+        DOS,
+        RCE_MEDIUM,
+    }  # escalated to urgent
     s.record_scan(IMG, "img:1", [], counts, found)
+
     calmer, _ = parse(Config(epss_threshold=1.0))  # DOS drops back to normal
+
     s.record_scan(IMG, "img:1", [], counts, calmer)
-    assert s.alerted(IMG)[DOS] == "urgent"  # tiers only go up: no re-alert if EPSS rises again
+    assert (
+        s.alerted(IMG)[DOS] == "urgent"
+    )  # tiers only go up: no re-alert if EPSS rises again
     assert s.new_findings(IMG, found) == {}
 
 
@@ -78,20 +117,25 @@ class FakeNotifier:
 
     def notify(self, **kw):
         self.calls.append(kw)
+
         return self.ok if kw["tag"] == "urgent" else True
 
 
 def test_flush_sends_one_message_per_tier_and_rolls_back_failed_tier(tmp_path):
     found, counts = parse()
     state = State(tmp_path)
+
     state.record_scan(IMG, "img:1", [], counts, found)
+
     notifier = FakeNotifier(ok=False)  # urgent send fails, normal succeeds
     alerter = Alerter(Config(), notifier)
+
     alerter.add(ImageAlert(IMG, "img:1", [], True, found, dict.fromkeys(found)))
     alerter.flush(state)
-
     assert [c["tag"] for c in notifier.calls] == ["urgent", "normal"]
+
     urgent = notifier.calls[0]
+
     assert urgent["title"].startswith("🔴 URGENT: 3 new vulnerabilities")
     assert "· KEV · EPSS 100% · RCE" in urgent["body"]
     assert "CVE-2021-39537" not in urgent["body"]
@@ -101,7 +145,14 @@ def test_flush_sends_one_message_per_tier_and_rolls_back_failed_tier(tmp_path):
 
 def test_default_routing_sends_urgent_to_main_urls():
     a = Alerter(Config(apprise_urls="json://localhost/a"))
+
     assert len(list(a.notifier.find("urgent"))) == 1
-    b = Alerter(Config(apprise_urls="json://localhost/a", apprise_urls_urgent="json://localhost/b"))
+
+    b = Alerter(
+        Config(
+            apprise_urls="json://localhost/a", apprise_urls_urgent="json://localhost/b"
+        )
+    )
+
     assert len(list(b.notifier.find("urgent"))) == 1
     assert len(list(b.notifier.find("normal"))) == 1
