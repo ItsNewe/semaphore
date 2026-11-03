@@ -1,4 +1,5 @@
 """Settings, read once from the environment"""
+
 from __future__ import annotations
 
 import os
@@ -6,16 +7,25 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-SEV_RANK = {"unknown": 0, "negligible": 1, "low": 2, "medium": 3, "high": 4, "critical": 5}
+SEV_RANK = {
+    "unknown": 0,
+    "negligible": 1,
+    "low": 2,
+    "medium": 3,
+    "high": 4,
+    "critical": 5,
+}
 
 
 def env_bool(name: str, default: bool = False) -> bool:
     v = os.getenv(name)
+
     return default if v is None else v.strip().lower() in ("1", "true", "yes", "on")
 
 
 def env_hours(name: str, default: float) -> float:
     """Reads an hours setting and returns seconds"""
+
     return float(os.getenv(name, str(default))) * 3600
 
 
@@ -60,6 +70,7 @@ class Config:
     @classmethod
     def from_env(cls) -> Config:
         exclude = os.getenv("EXCLUDE_IMAGES", "").strip()
+
         return cls(
             data_dir=Path(os.getenv("DATA_DIR", "/data")),
             apprise_urls=os.getenv("APPRISE_URLS", "").strip(),

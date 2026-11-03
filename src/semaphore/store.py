@@ -1,4 +1,5 @@
 """Persistent scan state (state.json) and the human-readable summary.json"""
+
 from __future__ import annotations
 
 import json
@@ -25,29 +26,49 @@ class State:
     def load(self) -> None:
         if not self.path.exists():
             return
+
         try:
             data = json.loads(self.path.read_text())
         except (OSError, ValueError):
             log.warning("state.json unreadable, starting fresh")
+
             return
+
         self.images = data.get("images", {})
         self.meta = data.get("meta", {})
+
         for img in self.images.values():
             if isinstance(img.get("alerted"), list):  # pre-tier state.json
                 img["alerted"] = dict.fromkeys(img["alerted"], "normal")
 
     def save(self) -> None:
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"images": self.images, "meta": self.meta}, indent=2, sort_keys=True))
+
+        tmp.write_text(
+            json.dumps(
+                {"images": self.images, "meta": self.meta}, indent=2, sort_keys=True
+            )
+        )
         tmp.replace(self.path)
 
     def write_summary(self) -> None:
         rows = [
-            {"image_id": k, **{f: v.get(f) for f in ("name", "containers", "counts", "last_scan")}}
+            {
+                "image_id": k,
+                **{f: v.get(f) for f in ("name", "containers", "counts", "last_scan")},
+            }
             for k, v in self.images.items()
         ]
-        rows.sort(key=lambda r: (-worst(s for s, n in (r["counts"] or {}).items() if n), r["name"] or ""))
-        self.summary_path.write_text(json.dumps({"generated": now_iso(), "images": rows}, indent=2))
+
+        rows.sort(
+            key=lambda r: (
+                -worst(s for s, n in (r["counts"] or {}).items() if n),
+                r["name"] or "",
+            )
+        )
+        self.summary_path.write_text(
+            json.dumps({"generated": now_iso(), "images": rows}, indent=2)
+        )
 
     # ------------------------------------------------------------ images
 
@@ -56,31 +77,52 @@ class State:
 
     def alerted(self, image_id: str) -> dict[str, str]:
         """{finding key: highest tier already alerted} for an image"""
+
         return dict(self.images.get(image_id, {}).get("alerted", {}))
 
-    def new_findings(self, image_id: str, found: dict[str, Finding]) -> dict[str, Finding]:
+    def new_findings(
+        self, image_id: str, found: dict[str, Finding]
+    ) -> dict[str, Finding]:
         """Findings never alerted, or escalated since (normal -> urgent, e.g. newly added to KEV)"""
-        before = self.alerted(image_id)
-        return {k: f for k, f in found.items()
-                if k not in before or TIER_RANK[f.tier] > TIER_RANK[before[k]]}
 
-    def record_scan(self, image_id: str, name: str, containers: list[str], counts: dict,
-                    found: dict[str, Finding]) -> None:
+        before = self.alerted(image_id)
+
+        return {
+            k: f
+            for k, f in found.items()
+            if k not in before or TIER_RANK[f.tier] > TIER_RANK[before[k]]
+        }
+
+    def record_scan(
+        self,
+        image_id: str,
+        name: str,
+        containers: list[str],
+        counts: dict,
+        found: dict[str, Finding],
+    ) -> None:
         """Stores the scan. Alerted tiers only go up, so an EPSS dipping and rising again doesn't re-alert"""
+
         before = self.alerted(image_id)
         self.images[image_id] = {
             "name": name,
             "containers": containers,
             "last_scan": now_iso(),
             "counts": counts,
-            "alerted": {k: max(f.tier, before.get(k, "normal"), key=TIER_RANK.get) for k, f in found.items()},
+            "alerted": {
+                k: max(f.tier, before.get(k, "normal"), key=TIER_RANK.get)
+                for k, f in found.items()
+            },
         }
 
     def rollback(self, image_id: str, previous: dict[str, str | None]) -> None:
         """Restores alert marks after a failed send (None = never alerted), so the next rescan retries"""
+
         img = self.images.get(image_id)
+
         if not img:
             return
+
         for k, tier in previous.items():
             if tier is None:
                 img["alerted"].pop(k, None)
