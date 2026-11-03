@@ -7,7 +7,11 @@ from semaphore.scan import exploit_class, parse_matches
 from semaphore.store import State
 
 # Trimmed real Grype 0.121 output: httpd:2.4.49 and python:3.8-slim-buster
-SAMPLE = json.loads((Path(__file__).parent / "grype_sample.json").read_text())
+RAW = (Path(__file__).parent / "grype_sample.json").read_text()
+SAMPLE = json.loads(RAW)
+
+# CVE-2023-50387 is "wont-fix" in the real sample; cleared here so it stays the high-EPSS DoS fixture
+SAMPLE["matches"][1]["vulnerability"]["fix"]["state"] = ""
 KEV, DOS, RCE_MEDIUM, PLAIN = (
     "CVE-2021-42013|httpd|2.4.49",
     "CVE-2023-50387|libsystemd0|241-7~deb10u9",
@@ -27,11 +31,55 @@ def test_parse_matches_tiers():
     assert counts == {"Critical": 1, "High": 2, "Medium": 2}
 
     # CVE-2022-4415 (Medium, nothing urgent) is dropped; CVE-2023-5752 (Medium, CWE-77) is kept as urgent
-    assert set(found) == {KEV, DOS, RCE_MEDIUM, PLAIN}
+    assert set(found) == {KEV, DOS, PLAIN}
     assert (found[KEV].kev, found[KEV].tier) == (True, "urgent")
     assert (found[DOS].cls, found[DOS].tier) == ("DoS", "urgent")  # EPSS 0.9999
-    assert (found[RCE_MEDIUM].cls, found[RCE_MEDIUM].tier) == ("RCE", "urgent")
+    assert (
+        RCE_MEDIUM not in found
+    )  # CWE-77 but needs privileges (PR:L): not RCE, so a plain Medium
     assert (found[PLAIN].cls, found[PLAIN].tier) == ("", "normal")
+
+
+def test_wont_fix_dropped_unless_known_exploited():
+    found, _ = parse_matches(json.loads(RAW), 0, 0.1)
+
+    assert {f.id for f in found.values()} == {
+        "CVE-2021-42013",
+        "CVE-2021-39537",
+        "CVE-2023-5752",
+    }  # both libsystemd0 CVEs dropped
+
+    kev_wont_fix = json.loads(RAW)
+    kev_wont_fix["matches"][0]["vulnerability"]["fix"]["state"] = "wont-fix"
+
+    assert KEV in parse_matches(kev_wont_fix, 0, 0.1)[0]
+
+    assert DOS in parse_matches(json.loads(RAW), 0, 0.1, skip_wont_fix=False)[0]
+
+
+def test_exploit_class_rce_needs_no_privileges():
+    v = {"cwes": [{"cwe": "CWE-77"}]}
+
+    assert exploit_class(v, []) == "RCE"  # no CVSS: trust the CWE
+    assert (
+        exploit_class(
+            {
+                **v,
+                "cvss": [
+                    {"vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:N/VC:H/VI:H/VA:H"}
+                ],
+            },
+            [],
+        )
+        == ""
+    )
+    assert (
+        exploit_class(
+            {**v, "cvss": [{"vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]},
+            [],
+        )
+        == "RCE"
+    )
 
 
 def test_epss_threshold_is_configurable():
@@ -92,11 +140,7 @@ def test_escalation_counts_as_new_but_not_downgrade(tmp_path):
     s = State(tmp_path)
     s.images[IMG] = {"alerted": {k: "normal" for k in found}}
 
-    assert set(s.new_findings(IMG, found)) == {
-        KEV,
-        DOS,
-        RCE_MEDIUM,
-    }  # escalated to urgent
+    assert set(s.new_findings(IMG, found)) == {KEV, DOS}  # escalated to urgent
     s.record_scan(IMG, "img:1", [], counts, found)
 
     calmer, _ = parse(Config(epss_threshold=1.0))  # DOS drops back to normal
@@ -136,7 +180,7 @@ def test_flush_sends_one_message_per_tier_and_rolls_back_failed_tier(tmp_path):
 
     urgent = notifier.calls[0]
 
-    assert urgent["title"].startswith("🔴 URGENT: 3 new vulnerabilities")
+    assert urgent["title"].startswith("🔴 URGENT: 2 new vulnerabilities")
     assert "· KEV · EPSS 100% · RCE" in urgent["body"]
     assert "CVE-2021-39537" not in urgent["body"]
     assert state.alerted(IMG) == {PLAIN: "normal"}  # urgent ones un-marked for retry

@@ -73,11 +73,14 @@ def exploit_class(vuln: dict, related: list[dict]) -> str:
     entries = [vuln, *related]
     cwes = {c.get("cwe") for e in entries for c in e.get("cwes") or []}
     text = " ".join(e.get("description") or "" for e in entries)
+    vectors = [c.get("vector") or "" for e in entries for c in e.get("cvss") or []]
 
-    if cwes & RCE_CWES or RCE_TEXT.search(text):
+    # Needing privileges (PR:L/H) means it is not remote code execution for an outsider
+    scored = [v for v in vectors if v.startswith("CVSS:")]
+    unauthenticated = not scored or any("/PR:N/" in v for v in scored)
+
+    if unauthenticated and (cwes & RCE_CWES or RCE_TEXT.search(text)):
         return "RCE"
-
-    vectors = (c.get("vector") or "" for e in entries for c in e.get("cvss") or [])
 
     if (
         cwes & DOS_CWES
@@ -219,12 +222,13 @@ class Scanner:
 
 
 def parse_matches(
-    report: dict, min_rank: int, epss_threshold: float
+    report: dict, min_rank: int, epss_threshold: float, skip_wont_fix: bool = True
 ) -> tuple[dict[str, Finding], dict]:
     """Returns (alertable findings keyed by vuln|pkg|version, counts for all severities)
 
     Alertable = at/above min_rank, or urgent at any severity: a known-exploited
-    Medium matters more than an unexploited High
+    Medium matters more than an unexploited High. Findings the distro won't fix
+    (Debian no-dsa/ignored, fix state "wont-fix") are skipped unless known-exploited or skip_wont_fix is off
     """
 
     unique: dict = {}
@@ -241,6 +245,14 @@ def parse_matches(
 
     for key, (sev, m) in unique.items():
         v, a = m.get("vulnerability", {}), m.get("artifact", {})
+
+        if (
+            skip_wont_fix
+            and (v.get("fix") or {}).get("state") == "wont-fix"
+            and not v.get("knownExploited")
+        ):
+            continue
+
         epss = max((e.get("epss") or 0.0 for e in v.get("epss") or []), default=None)
         f = Finding(
             id=v.get("id"),
