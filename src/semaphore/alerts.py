@@ -1,7 +1,6 @@
 """Batches new findings into Apprise notifications, one message per tier
 
-Routing uses Apprise tags: APPRISE_URLS get "normal" (plus "urgent" when no
-APPRISE_URLS_URGENT is set), APPRISE_URLS_URGENT get "urgent"
+Routing uses Apprise tags "urgent" and "normal", one per tier (see Config.routes)
 Fixing-update notices (see updates.py) go out as one more message, tagged "normal"
 """
 
@@ -16,7 +15,7 @@ import apprise
 from .config import Config
 from .scan import Finding
 from .store import State
-from .util import plural, rank, worst
+from .util import now_iso, plural, rank, worst
 
 log = logging.getLogger("semaphore")
 TIERS = {  # tier: (title prefix, Apprise notify type), most urgent first
@@ -146,20 +145,24 @@ class Alerter:
         self.config = config
         self.notifier = notifier
 
-        if notifier is None and (config.apprise_urls or config.apprise_urls_urgent):
+        if notifier is None:
+            self.configure(config)
+
+    def configure(self, config: Config) -> None:
+        """Applies a new config and rebuilds the notifier from its routes. Pending alerts are kept"""
+
+        self.config = config
+        self.notifier = None
+        routes = config.routes()
+
+        if routes:
             self.notifier = apprise.Apprise()
 
-            # Apprise accepts multiple URLs separated by spaces or commas
-            if config.apprise_urls:
-                self.notifier.add(
-                    config.apprise_urls,
-                    tag=["normal"]
-                    if config.apprise_urls_urgent
-                    else ["normal", "urgent"],
-                )
-
-            if config.apprise_urls_urgent:
-                self.notifier.add(config.apprise_urls_urgent, tag="urgent")
+            for (
+                urls,
+                tiers,
+            ) in routes:  # Apprise accepts multiple URLs separated by spaces or commas
+                self.notifier.add(urls, tag=list(tiers))
 
     def add(self, alert: ImageAlert) -> None:
         self.pending.append(alert)
@@ -280,6 +283,7 @@ class Alerter:
 
         batch, self.pending = self.pending, []
         updates, self.updates = self.updates, []
+        messages = []
 
         for tier, (prefix, _) in TIERS.items():
             items = [a for a in (item.only(tier) for item in batch) if a]
@@ -289,6 +293,7 @@ class Alerter:
 
             title, body = self.format(items, prefix)
 
+            messages.append({"tier": tier, "title": title, "body": body})
             log.warning("%s\n%s", title, body)
 
             if self.send(tier, title, body) is False:
@@ -306,6 +311,7 @@ class Alerter:
             )
             body = self.cap([line for _, line in updates])
 
+            messages.append({"tier": "normal", "title": title, "body": body})
             log.warning("%s\n%s", title, body)
 
             if self.send("normal", title, body) is False:
@@ -315,6 +321,8 @@ class Alerter:
             else:
                 for image_id, _ in updates:
                     state.mark_update_notified(image_id)
+
+        state.meta["last_batch"] = {"sent": now_iso(), "messages": messages}
 
     def send(self, tier: str, title: str, body: str) -> bool | None:
         """Notifies the targets routed to a tier. None when the tier has no destination (log only)"""

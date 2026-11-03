@@ -1,12 +1,15 @@
-"""Settings, read once from the environment"""
+"""Settings from the environment, overridable by <data_dir>/settings.json (edited with semaphore-tui)"""
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
+log = logging.getLogger("semaphore")
 SEV_RANK = {
     "unknown": 0,
     "negligible": 1,
@@ -53,6 +56,9 @@ class Config:
     crane_timeout: int = 120
     grype_config: Path = Path("/config/grype.yaml")
     exclude: re.Pattern | None = None
+    targets: tuple | None = (
+        None  # ((url, tiers), ...) from settings.json, None = use the APPRISE_URLS* env vars
+    )
 
     def __post_init__(self) -> None:
         if self.min_severity not in SEV_RANK:
@@ -69,6 +75,62 @@ class Config:
     @property
     def report_dir(self) -> Path:
         return self.data_dir / "reports"
+
+    @property
+    def settings_path(self) -> Path:
+        return self.data_dir / "settings.json"
+
+    def apply_settings(self) -> Config:
+        """This config overridden by <data_dir>/settings.json (written by the TUI). Unusable file = no override"""
+
+        try:
+            s = json.loads(self.settings_path.read_text())
+
+            return replace(
+                self,
+                min_severity=str(s.get("min_severity", self.min_severity)).lower(),
+                epss_threshold=float(s.get("epss_threshold", self.epss_threshold)),
+                targets=(
+                    tuple((t["url"], tuple(t["tiers"])) for t in s["targets"])
+                    if "targets" in s
+                    else self.targets
+                ),
+            )
+        except FileNotFoundError:
+            return self
+        except (
+            OSError,
+            ValueError,
+            TypeError,
+            KeyError,
+            AttributeError,
+            SystemExit,
+        ) as e:
+            log.warning("Ignoring %s: %s", self.settings_path, e)
+
+            return self
+
+    def routes(self) -> list[tuple[str, tuple[str, ...]]]:
+        """(Apprise URLs, tier tags) pairs. Without settings.json targets, APPRISE_URLS gets urgent too
+        unless APPRISE_URLS_URGENT is set"""
+
+        if self.targets is not None:
+            return [(url, tiers) for url, tiers in self.targets if url and tiers]
+
+        routes = []
+
+        if self.apprise_urls:
+            routes.append(
+                (
+                    self.apprise_urls,
+                    ("normal",) if self.apprise_urls_urgent else ("normal", "urgent"),
+                )
+            )
+
+        if self.apprise_urls_urgent:
+            routes.append((self.apprise_urls_urgent, ("urgent",)))
+
+        return routes
 
     @classmethod
     def from_env(cls) -> Config:

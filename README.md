@@ -75,10 +75,25 @@ later checks only re-match it. The candidate fixing the most findings is kept. I
 
 - a `⬆ nginx:1.27.5 fixes 7/9` line under the image in alerts, and `· ⬆ fixed` on each fixed finding
 - one `⬆ 1 fixing update available` message (normal tier), sent once per candidate digest
-- `update` in `summary.json`
+- `update` in `summary.json`, and the **Updates** tab of the TUI
 
 Images built locally (no registry digest) are skipped. For private registries, mount a Docker `config.json`
 and point `DOCKER_CONFIG` at its directory. crane and syft both read it.
+
+## TUI
+
+```sh
+docker exec -it semaphore semaphore-tui
+```
+
+- **Tiers**: `MIN_SEVERITY` and `EPSS_THRESHOLD`
+- **Targets**: Apprise URLs and which tiers (urgent, normal) each one receives
+- **Resend**: re-sends the latest notification batch to the saved targets
+- **Updates**: images with a fixing update and what it fixes
+- **Test**: sends a fake alert with the chosen severities and tier
+
+Saving (`ctrl+s`) writes `/data/settings.json`, which overrides the matching env vars. The daemon picks it up at its next task (at most `RECONCILE_INTERVAL_SECONDS`, 5 min),
+no restart needed. Delete the file to go back to the env vars.
 
 ## Ignoring CVEs
 
@@ -104,4 +119,5 @@ Managed with [uv](https://docs.astral.sh/uv/). Sources live in `src/semaphore/`.
 uv sync                 # create .venv with runtime + dev deps
 uv run pytest           # tests
 uv run semaphore        # run locally (needs syft, grype and DOCKER_HOST)
+uv run semaphore-tui    # TUI against DATA_DIR
 ```

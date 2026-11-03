@@ -26,7 +26,8 @@ RUN uv sync --locked --no-dev --no-install-project
 COPY src ./src
 RUN uv sync --locked --no-dev
 
-ENV PYTHONUNBUFFERED=1 \
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
     DATA_DIR=/data \
     GRYPE_DB_CACHE_DIR=/data/grype-db \
     SYFT_CHECK_FOR_APP_UPDATE=false \
