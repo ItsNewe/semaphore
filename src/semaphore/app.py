@@ -17,8 +17,9 @@ Alerts only cover findings not yet reported for that image or escalated to urgen
 They're batched into one message per tier: urgent (KEV, EPSS >= threshold, likely RCE) and normal
 
 Threads: the event watcher, the scheduler and the TUI socket (bus.py) only enqueue tasks; the worker
-thread is the only one touching State and Alerter, so no locking is needed. The worker pushes its
-status (images being scanned, current stage) to the TUI through the socket
+thread is the only one touching State and Alerter, so no locking is needed. The worker hands the
+SBOM + matching + update check of up to SCAN_WORKERS images to a thread pool and commits each result
+itself. The worker pushes its status (images being scanned, current stage) to the TUI through the socket
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ import os
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .alerts import Alerter, ImageAlert
 from .bus import Bus
@@ -55,13 +57,17 @@ class Semaphore:
         self.tasks: queue.Queue[tuple] = queue.Queue()
         self.scanning: set[str] = set()  # images left in the batch, pushed to the TUI
         self.bus = Bus(config.socket_path, self.tasks)
+        # Runs Semaphore.analyze: syft/grype/crane subprocesses, nothing touching State
+        self.pool = ThreadPoolExecutor(config.scan_workers, thread_name_prefix="scan")
         self.host: DockerHost | None = (
             None  # created in run(), used by the worker thread only
         )
 
     # ------------------------------------------------------------ core
 
-    def process_image(self, image_id: str, info: dict, rescan: bool = False) -> None:
+    def prepare(self, image_id: str, info: dict, rescan: bool) -> tuple | None:
+        """(image_id, info, refs, name, is_new) of an image to scan, None if excluded or already scanned"""
+
         hid = hex_id(image_id)
         refs = self.host.candidate_refs(image_id, info.get("refs", ()))
         name = next((r for r in refs if r != hid), f"<untagged {hid[:12]}>")
@@ -69,21 +75,26 @@ class Semaphore:
         if self.config.exclude and any(self.config.exclude.search(r) for r in refs):
             log.debug("Skipping excluded image %s", name)
 
-            return
+            return None
 
         is_new = not self.scanner.has_sbom(image_id)
 
         if not is_new and image_id in self.state and not rescan:
-            return  # already scanned; the periodic rescan handles new CVEs
+            return None  # already scanned; the periodic rescan handles new CVEs
 
-        self.mark_scanning([image_id])
+        return image_id, info, refs, name, is_new
+
+    def analyze(
+        self, image_id: str, info: dict, refs: list[str], name: str, is_new: bool
+    ) -> tuple:
+        """SBOM, matching and update check. Runs in the scan pool: no State, Alerter or DockerHost here
+        Returns (found, counts, rest, update), update is False when the check failed (keep the last result)"""
 
         if is_new:
             self.status("generating SBOM", name)
             self.scanner.generate_sbom(image_id, refs)
 
         self.status("matching vulnerabilities", name)
-        self.scanner.ensure_db()
 
         found, counts, rest = parse_matches(
             self.scanner.grype_scan(image_id),
@@ -106,7 +117,18 @@ class Semaphore:
             except RuntimeError as e:
                 log.warning("Update check failed for %s: %s", name, e)
 
-                update = self.state.update(image_id)  # keep the last known result
+                update = False
+
+        return found, counts, rest, update
+
+    def commit(self, job: tuple, result: tuple) -> None:
+        """Stores a scan and queues its alerts, on the worker thread"""
+
+        image_id, info, _, name, is_new = job
+        found, counts, rest, update = result
+
+        if update is False:
+            update = self.state.update(image_id)  # keep the last known result
 
         before = self.state.alerted(image_id)
         new = self.state.new_findings(image_id, found)
@@ -153,6 +175,34 @@ class Semaphore:
         if update and update["notified"] != update["digest"]:
             self.alerter.add_update(image_id, name, containers, update, found)
 
+    def scan_images(self, images: dict, rescan: bool = False) -> None:
+        """Scans {image_id: info} up to scan_workers at a time, commits each as it finishes
+        One image failing doesn't stop the others"""
+
+        jobs = []
+
+        for img_id, info in images.items():
+            try:
+                if job := self.prepare(img_id, info, rescan):
+                    jobs.append(job)
+            except Exception as e:
+                log.error("%s", e)
+                log.debug("details", exc_info=True)
+
+        if not jobs:
+            return
+
+        self.mark_scanning(j[0] for j in jobs)
+        self.scanner.ensure_db()
+
+        futures = {self.pool.submit(self.analyze, *job): job for job in jobs}
+
+        for f in as_completed(futures):
+            safe(lambda f=f: self.commit(futures[f], f.result()))
+
+    def process_image(self, image_id: str, info: dict, rescan: bool = False) -> None:
+        self.scan_images({image_id: info}, rescan)
+
     def prune(self) -> None:
         for img_id in self.state.ids():
             if self.host.has_image(img_id):
@@ -182,8 +232,7 @@ class Semaphore:
             for p in self.scanner.artifacts(img_id):
                 p.unlink(missing_ok=True)
 
-            if img_id in running:
-                safe(self.process_image, img_id, running[img_id])
+        self.scan_images({i: running[i] for i in targets if i in running})
 
     def scan_running(self, rescan: bool = False) -> None:
         running = self.host.running_images()
@@ -191,8 +240,7 @@ class Semaphore:
         if rescan:
             self.mark_scanning(running)
 
-        for img_id, info in running.items():
-            safe(self.process_image, img_id, info, rescan=rescan)
+        self.scan_images(running, rescan)
 
     def handle(self, task: tuple) -> None:
         kind = task[0]
@@ -217,13 +265,32 @@ class Semaphore:
         elif kind == "settings":
             self.reload_settings()
         elif kind == "image":
-            _, img_id, hint = task
-            info = self.host.running_images().get(img_id) or {
-                "containers": set(),
-                "refs": {hint} if hint else set(),
-            }
+            # Takes the image tasks queued behind this one too (compose up), so they scan in parallel
+            hints, later = {task[1]: task[2]}, []
 
-            self.process_image(img_id, info)
+            while True:
+                try:
+                    t = self.tasks.get_nowait()
+                except queue.Empty:
+                    break
+
+                if t[0] == "image":
+                    hints.setdefault(t[1], t[2])
+                else:
+                    later.append(t)
+
+            for t in later:
+                self.tasks.put(t)
+
+            running = self.host.running_images()
+
+            self.scan_images(
+                {
+                    i: running.get(i)
+                    or {"containers": set(), "refs": {hint} if hint else set()}
+                    for i, hint in hints.items()
+                }
+            )
 
     def end_of_batch(self) -> None:
         """Runs once the queue is drained: send alerts, then persist (after any alert rollback)"""

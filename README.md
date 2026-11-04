@@ -32,6 +32,7 @@ SBOMs are keyed by image ID so restarts and redeploys of the same image are noop
 | `SKIP_NEGLIGIBLE` | `true` | Skip findings of `Negligible` severity, even urgent ones, unless in CISA KEV |
 | `RESCAN_SCHEDULE` | `0 0 * * *` | Cron expression (5 fields, local time per `TZ`) to re-match SBOMs against a fresh DB |
 | `SCAN_ON_PULL` | `false` | Also react to `image pull` events |
+| `SCAN_WORKERS` | `2` | Images scanned in parallel |
 | `EXCLUDE_IMAGES` | – | Regex to filter image names |
 | `ALERT_MAX_LINES_PER_IMAGE` | `5` | CVE lines listed per image in an alert, most important first (KEV, RCE, severity, EPSS) |
 | `ALERT_MAX_CHARS` | `1800` | Body cap |

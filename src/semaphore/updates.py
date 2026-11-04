@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 
 from .config import Config
 from .scan import Finding, Scanner, parse_matches
@@ -127,7 +128,8 @@ class UpdateChecker:
         else:
             log.info("Generating SBOM for update candidate %s", pull_ref)
 
-            tmp = sbom.with_suffix(".partial")
+            # Per thread: two images can share a candidate digest
+            tmp = sbom.with_name(f"{sbom.name}.{threading.get_ident()}.partial")
 
             run_tool(
                 [

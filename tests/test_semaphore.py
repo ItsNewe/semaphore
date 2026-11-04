@@ -2,6 +2,7 @@ import json
 import queue
 import socket
 import tempfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -684,7 +685,7 @@ def test_rescan_request_discards_and_rescans_running_images(tmp_path):
             return running
 
     sem.host = Host()
-    sem.process_image = lambda img_id, info, **kw: rescanned.append(img_id)
+    sem.scan_images = lambda images, *a: rescanned.extend(images)
 
     sem.config.sbom_dir.mkdir()
 
@@ -701,6 +702,43 @@ def test_rescan_request_discards_and_rescans_running_images(tmp_path):
     sem.bus.receive({"rescan": None})  # all: stored and running images
     sem.handle(sem.tasks.get_nowait())
     assert IMG not in sem.state and rescanned == ["sha256:run"]
+
+
+def test_scan_images_analyzes_in_parallel_and_commits_on_worker(tmp_path):
+    from semaphore.app import Semaphore
+
+    sem = Semaphore(Config(data_dir=tmp_path, scan_workers=2))
+    found, counts, rest = parse_matches(SAMPLE, sem.config.min_rank, 0.1)
+    both = threading.Barrier(
+        2, timeout=5
+    )  # times out if the two analyses run one after the other
+    committed = []
+
+    class Host:
+        def candidate_refs(self, img_id, hints):
+            return [*hints, img_id]
+
+    def analyze(img_id, *_):
+        both.wait()
+
+        return found, counts, rest, None
+
+    def commit(job, result, real=sem.commit):
+        committed.append(threading.current_thread())
+        real(job, result)
+
+    sem.host, sem.analyze, sem.commit = Host(), analyze, commit
+    sem.scanner.ensure_db = lambda: None
+
+    sem.scan_images(
+        {
+            "sha256:a": {"containers": {"a"}, "refs": {"a:1"}},
+            "sha256:b": {"containers": {"b"}, "refs": {"b:1"}},
+        }
+    )
+    assert "sha256:a" in sem.state and "sha256:b" in sem.state
+    assert committed == [threading.current_thread()] * 2 and not sem.scanning
+    assert sem.alerter.pending
 
 
 def test_tui_lists_images_and_requests_rescan_after_confirm(

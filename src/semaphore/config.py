@@ -58,6 +58,8 @@ class Config:
     grype_timeout: int = 600
     db_update_timeout: int = 900
     crane_timeout: int = 120
+    # images scanned in parallel, each runs syft/grype on about one core
+    scan_workers: int = 2
     grype_config: Path = Path("/config/grype.yaml")
     exclude: re.Pattern | None = None
     targets: tuple | None = (
@@ -65,6 +67,9 @@ class Config:
     )
 
     def __post_init__(self) -> None:
+        if self.scan_workers < 1:
+            raise SystemExit("SCAN_WORKERS must be at least 1")
+
         if self.min_severity not in SEV_RANK:
             raise SystemExit(f"MIN_SEVERITY must be one of: {', '.join(SEV_RANK)}")
 
@@ -177,6 +182,7 @@ class Config:
             syft_timeout=int(os.getenv("SYFT_TIMEOUT_SECONDS", "1800")),
             grype_timeout=int(os.getenv("GRYPE_TIMEOUT_SECONDS", "600")),
             crane_timeout=int(os.getenv("CRANE_TIMEOUT_SECONDS", "120")),
+            scan_workers=int(os.getenv("SCAN_WORKERS", "2")),
             grype_config=Path(os.getenv("GRYPE_CONFIG", "/config/grype.yaml")),
             exclude=re.compile(exclude) if exclude else None,
         )
