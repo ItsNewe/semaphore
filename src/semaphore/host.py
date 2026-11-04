@@ -84,9 +84,9 @@ class DockerHost:
 
             try:
                 if ev.get("Type") == "container":
-                    img_id = self.client.containers.get(ev["id"]).attrs["Image"]
+                    img_id = self.client.containers.get(actor["ID"]).attrs["Image"]
                 else:
-                    img_id = self.client.images.get(ev["id"]).id
+                    img_id = self.client.images.get(actor["ID"]).id
             except (NotFound, KeyError):
                 continue
 
