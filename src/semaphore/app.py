@@ -5,7 +5,7 @@ for every image that is actually running on this Docker host
   container `start` event (optionally image `pull`)  -> unseen image? -> SBOM + scan
   every RECONCILE_INTERVAL_SECONDS                    -> catch anything the event stream missed
   every RESCAN_INTERVAL_HOURS                         -> refresh Grype DB, re-match stored SBOMs
-  <data_dir>/rescan.json written by the TUI            -> discard scans + alert marks, rescan as new
+  rescan request stored in semaphore.db by the TUI     -> discard scans + alert marks, rescan as new
 
 Vulnerable images also get an update check on each scan: is the same tag rebuilt upstream, or is there
 a newer version tag, and which findings would it fix (updates.py)
@@ -17,12 +17,12 @@ Alerts only cover findings not yet reported for that image or escalated to urgen
 They're batched into one message per tier: urgent (KEV, EPSS >= threshold, likely RCE) and normal
 
 Threads: the event watcher, the scheduler and the request watcher only enqueue tasks; the worker
-thread is the only one touching State and Alerter, so no locking is needed
+thread is the only one touching State and Alerter, so no locking is needed. The request watcher
+has its own State connection, only to take rescan requests
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import queue
@@ -43,15 +43,18 @@ log = logging.getLogger("semaphore")
 class Semaphore:
     def __init__(self, config: Config) -> None:
         self.base = (
-            config  # env only, settings.json is re-applied on top when it changes
+            config  # env only, the TUI settings are re-applied on top when they change
         )
-        self.settings_mtime = self.settings_stamp()
-        self.config = config.apply_settings()
         self.state = State(config.data_dir)
+        self.settings = self.state.settings
+        self.config = config.apply_settings(self.settings)
         self.scanner = Scanner(config)
         self.updates = UpdateChecker(config, self.scanner)
         self.alerter = Alerter(self.config)
         self.tasks: queue.Queue[tuple] = queue.Queue()
+        self.scanning: set[str] = (
+            set()
+        )  # mirrors State.scanning for the TUI spinners
         self.host: DockerHost | None = (
             None  # created in run(), used by the worker thread only
         )
@@ -72,6 +75,8 @@ class Semaphore:
 
         if not is_new and image_id in self.state and not rescan:
             return  # already scanned; the periodic rescan handles new CVEs
+
+        self.mark_scanning([image_id])
 
         if is_new:
             self.scanner.generate_sbom(image_id, refs)
@@ -104,6 +109,10 @@ class Semaphore:
         containers = sorted(info.get("containers", ()))
 
         self.state.record_scan(image_id, name, containers, counts, found, update, rest)
+        self.scanning.discard(image_id)
+
+        self.state.scanning = sorted(self.scanning)
+        self.state.save()  # TUI sees each scan as it finishes
 
         update = self.state.update(image_id)
         urgent = sum(f.tier == "urgent" for f in found.values())
@@ -160,9 +169,11 @@ class Semaphore:
         targets = set(self.state.ids()) | set(running) if ids is None else ids
 
         log.info("Discarding the scans of %d image(s), rescanning them", len(targets))
+        self.mark_scanning(i for i in targets if i in running)
 
         for img_id in targets:
             self.state.forget(img_id)
+            self.state.save()  # don't hold the write lock through the SBOM generation
 
             for p in self.scanner.artifacts(img_id):
                 p.unlink(missing_ok=True)
@@ -171,7 +182,12 @@ class Semaphore:
                 safe(self.process_image, img_id, running[img_id])
 
     def scan_running(self, rescan: bool = False) -> None:
-        for img_id, info in self.host.running_images().items():
+        running = self.host.running_images()
+
+        if rescan:
+            self.mark_scanning(running)
+
+        for img_id, info in running.items():
             safe(self.process_image, img_id, info, rescan=rescan)
 
     def handle(self, task: tuple) -> None:
@@ -205,25 +221,38 @@ class Semaphore:
         """Runs once the queue is drained: send alerts, then persist (after any alert rollback)"""
 
         self.alerter.flush(self.state)
+
+        if self.scanning:  # images whose scan failed
+            self.scanning.clear()
+
+            self.state.scanning = []
+
         self.state.save()
         self.state.write_summary()
 
-    def settings_stamp(self) -> float | None:
-        try:
-            return self.base.settings_path.stat().st_mtime
-        except OSError:
-            return None
+    def mark_scanning(self, ids) -> None:
+        """Adds ids to the images being scanned, shown by the TUI. Commits"""
 
-    def reload_settings(self) -> None:
-        """Re-applies settings.json when the TUI changed it"""
+        ids = set(ids)
 
-        stamp = self.settings_stamp()
-
-        if stamp == self.settings_mtime:
+        if ids <= self.scanning:
             return
 
-        self.settings_mtime = stamp
-        self.config = self.base.apply_settings()
+        self.scanning |= ids
+        self.state.scanning = sorted(self.scanning)
+
+        self.state.save()
+
+    def reload_settings(self) -> None:
+        """Re-applies the settings when the TUI changed them"""
+
+        settings = self.state.settings
+
+        if settings == self.settings:
+            return
+
+        self.settings = settings
+        self.config = self.base.apply_settings(settings)
 
         self.alerter.configure(self.config)
         log.info(
@@ -272,27 +301,19 @@ class Semaphore:
 
             time.sleep(5)
 
-    def check_requests(self) -> None:
-        """Queues a discard task for the TUI's rescan.json. Renamed before reading so a request written meanwhile isn't lost"""
+    def check_requests(self, state: State) -> None:
+        """Queues a discard task for the TUI's rescan request. Reads first so idle polls never take the write lock"""
 
-        path = self.base.rescan_path
-        taken = path.with_suffix(".taken")
-
-        try:
-            path.rename(taken)
-        except FileNotFoundError:
-            return
-
-        try:
-            self.tasks.put(("discard", json.loads(taken.read_text())["images"]))
-        except (OSError, ValueError, KeyError, TypeError) as e:
-            log.warning("Ignoring rescan request %s: %s", path, e)
-
-        taken.unlink(missing_ok=True)
+        if state.rescan_request is not None and (req := state.take_rescan()):
+            self.tasks.put(("discard", req.get("images")))
 
     def watch_requests(self) -> None:
+        state = State(
+            self.base.data_dir
+        )  # own connection: sqlite3 ones aren't shared across threads
+
         while True:
-            safe(self.check_requests)
+            safe(self.check_requests, state)
             time.sleep(2)
 
     def scheduler(self, last_rescan: float) -> None:
@@ -316,6 +337,8 @@ class Semaphore:
 
         for d in (cfg.sbom_dir, cfg.report_dir):
             d.mkdir(parents=True, exist_ok=True)
+
+        self.state.scanning = []  # left over by a crash mid-batch
 
         log.info(
             "semaphore starting: min severity=%s, urgent at EPSS>=%s/KEV/RCE, only fixed=%s, "

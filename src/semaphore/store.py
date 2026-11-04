@@ -1,10 +1,11 @@
 """Persistent scan state in <data_dir>/semaphore.db (SQLite) and the human-readable summary.json
 
 Tables: images (latest scan per image), findings (every finding of that scan, alertable flag, highest tier
-alerted), scans (append-only log of every scan with the finding keys added and removed), meta
+alerted), scans (append-only log of every scan with the finding keys added and removed), meta (also
+how the TUI and the daemon talk: settings, rescan request, images being scanned)
 
-Writes stay in one open transaction until save(), so a failed send rolls its marks back before they
-are committed and a crash mid-batch re-alerts instead of losing alerts
+The daemon commits after each image so the TUI sees scans as they finish. A failed send rolls its marks
+back at the end of the batch
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ class State:
     def __init__(self, data_dir: Path, readonly: bool = False) -> None:
         self.path = data_dir / "semaphore.db"
         self.legacy_path = data_dir / "state.json"
+        self.legacy_settings_path = data_dir / "settings.json"
         self.summary_path = data_dir / "summary.json"
 
         if readonly and self.path.exists():
@@ -71,6 +73,7 @@ class State:
                 )
 
             self.import_legacy()
+            self.import_legacy_settings()
 
     def save(self) -> None:
         self.db.commit()
@@ -125,6 +128,25 @@ class State:
         self.save()
         self.legacy_path.rename(self.legacy_path.with_name("state.json.imported"))
         log.info("Imported %d image(s) from state.json", len(data.get("images", {})))
+
+    def import_legacy_settings(self) -> None:
+        """One-time import of the old settings.json, renamed to settings.json.imported afterwards"""
+
+        if not self.legacy_settings_path.exists() or self.settings is not None:
+            return
+
+        try:
+            self.settings = json.loads(self.legacy_settings_path.read_text())
+        except (OSError, ValueError):
+            log.warning("settings.json unreadable, not imported")
+
+            return
+
+        self.save()
+        self.legacy_settings_path.rename(
+            self.legacy_settings_path.with_name("settings.json.imported")
+        )
+        log.info("Imported settings.json")
 
     def write_summary(self) -> None:
         rows = [
@@ -358,3 +380,59 @@ class State:
     @last_batch.setter
     def last_batch(self, batch: dict) -> None:
         self.set_meta("last_batch", batch)
+
+    @property
+    def settings(self) -> dict | None:
+        """Overrides edited in the TUI (Config.apply_settings), None = env only"""
+
+        return self.get_meta("settings")
+
+    @settings.setter
+    def settings(self, settings: dict) -> None:
+        self.set_meta("settings", settings)
+
+    @property
+    def scanning(self) -> list[str]:
+        """Image ids the daemon is scanning in the current batch"""
+
+        return self.get_meta("scanning") or []
+
+    @scanning.setter
+    def scanning(self, ids: list[str]) -> None:
+        self.set_meta("scanning", ids)
+
+    @property
+    def rescan_request(self) -> dict | None:
+        """{"images": [ids] or None for all} written by the TUI, not taken by the daemon yet"""
+
+        return self.get_meta("rescan")
+
+    def request_rescan(self, ids: list[str] | None) -> None:
+        """Merges ids into the pending rescan request and commits. None = every image"""
+
+        self.db.execute(
+            "BEGIN IMMEDIATE"
+        )  # no take_rescan between the read and the write
+
+        pending = (self.rescan_request or {"images": []})["images"]
+
+        self.set_meta(
+            "rescan",
+            {
+                "images": None
+                if ids is None or pending is None
+                else sorted({*pending, *ids})
+            },
+        )
+        self.save()
+
+    def take_rescan(self) -> dict | None:
+        """Pops the pending rescan request, in one statement so a request written meanwhile isn't lost"""
+
+        row = self.db.execute(
+            "DELETE FROM meta WHERE key = 'rescan' RETURNING value"
+        ).fetchone()
+
+        self.save()
+
+        return json.loads(row[0]) if row else None

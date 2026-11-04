@@ -88,7 +88,6 @@ def test_disputed_and_negligible_skipped_unless_known_exploited():
     report["matches"][1]["vulnerability"]["severity"] = (
         "Negligible"  # DOS, urgent by EPSS
     )
-
     found, _, rest = parse_matches(report, 0, 0.1)
 
     assert PLAIN in rest and DOS in rest and KEV in found
@@ -100,6 +99,7 @@ def test_disputed_and_negligible_skipped_unless_known_exploited():
     assert {PLAIN, DOS} <= found.keys()
 
     report["matches"][0]["vulnerability"]["severity"] = "Negligible"  # KEV still alerts
+
     assert KEV in parse_matches(report, 0, 0.1)[0]
 
 
@@ -172,6 +172,7 @@ def test_state_round_trip_and_uncommitted_batch_is_lost(tmp_path):
     assert s2.alerted(IMG) == {k: f.tier for k, f in found.items()}
     assert s2.last_rescan == 123.0
     assert s2.rows()[0]["containers"] == ["c1"] and s2.rows()[0]["counts"] == counts
+
     assert State(tmp_path / "missing", readonly=True).rows() == []
 
 
@@ -198,8 +199,10 @@ def test_scan_log_records_added_and_removed_findings(tmp_path):
     fewer = {k: f for k, f in found.items() if k != PLAIN}
 
     s.record_scan(IMG, "img:1", [], counts, found)
+
     first_seen = s.db.execute("SELECT first_seen FROM findings WHERE key = ?", (KEV,))
     first_seen = first_seen.fetchone()[0]
+
     s.db.execute("UPDATE findings SET first_seen = 'earlier'")
     s.record_scan(IMG, "img:1", [], counts, fewer)
 
@@ -221,7 +224,6 @@ def test_escalation_counts_as_new_but_not_downgrade(tmp_path):
 
     s.record_scan(IMG, "img:1", [], counts, found)
     s.db.execute("UPDATE findings SET alerted = 'normal'")
-
     assert set(s.new_findings(IMG, found)) == {KEV, DOS}  # escalated to urgent
     s.record_scan(IMG, "img:1", [], counts, found)
 
@@ -331,21 +333,17 @@ def test_default_routing_sends_urgent_to_main_urls():
     assert len(list(b.notifier.find("normal"))) == 1
 
 
-def test_settings_file_overrides_env_and_bad_file_is_ignored(tmp_path):
+def test_settings_override_env_and_bad_settings_are_ignored(tmp_path):
     env = Config(data_dir=tmp_path, apprise_urls="json://localhost/a")
 
-    assert env.apply_settings() is env  # no file
-    env.settings_path.write_text(
-        json.dumps(
-            {
-                "min_severity": "Critical",
-                "epss_threshold": 0.5,
-                "targets": [{"url": "json://localhost/b", "tiers": ["urgent"]}],
-            }
-        )
+    assert env.apply_settings(None) is env
+    cfg = env.apply_settings(
+        {
+            "min_severity": "Critical",
+            "epss_threshold": 0.5,
+            "targets": [{"url": "json://localhost/b", "tiers": ["urgent"]}],
+        }
     )
-
-    cfg = env.apply_settings()
 
     assert (cfg.min_severity, cfg.epss_threshold) == ("critical", 0.5)
 
@@ -354,10 +352,16 @@ def test_settings_file_overrides_env_and_bad_file_is_ignored(tmp_path):
     assert len(list(a.notifier.find("urgent"))) == 1 and not any(
         a.notifier.find("normal")
     )
-    env.settings_path.write_text(json.dumps({"targets": []}))
-    assert env.apply_settings().routes() == []  # emptied in the TUI, no fallback to env
-    env.settings_path.write_text(json.dumps({"min_severity": "bogus"}))
-    assert env.apply_settings() is env
+    # emptied in the TUI, no fallback to env
+    assert env.apply_settings({"targets": []}).routes() == []
+    assert env.apply_settings({"min_severity": "bogus"}) is env
+
+
+def test_legacy_settings_file_is_imported_once(tmp_path):
+    (tmp_path / "settings.json").write_text(json.dumps({"min_severity": "low"}))
+    assert State(tmp_path).settings == {"min_severity": "low"}
+    assert not (tmp_path / "settings.json").exists()
+    assert (tmp_path / "settings.json.imported").exists()
 
 
 def test_tui_saves_settings(tmp_path, monkeypatch):
@@ -379,7 +383,7 @@ def test_tui_saves_settings(tmp_path, monkeypatch):
 
     asyncio.run(run())
 
-    saved = json.loads((tmp_path / "settings.json").read_text())
+    saved = State(tmp_path, readonly=True).settings
 
     assert saved == {
         "min_severity": "high",
@@ -388,25 +392,33 @@ def test_tui_saves_settings(tmp_path, monkeypatch):
     }
 
 
-def test_daemon_reloads_settings_when_file_changes(tmp_path):
-    import os
-
+def test_daemon_reloads_settings_when_tui_changes_them(tmp_path):
     from semaphore.app import Semaphore
 
     sem = Semaphore(Config(data_dir=tmp_path))
+    tui = State(tmp_path)
 
     assert sem.alerter.notifier is None
-    sem.config.settings_path.write_text(
-        json.dumps(
-            {
-                "min_severity": "low",
-                "targets": [{"url": "json://localhost/a", "tiers": ["normal"]}],
-            }
-        )
-    )
-    os.utime(sem.config.settings_path, (1, 1))
+    tui.settings = {
+        "min_severity": "low",
+        "targets": [{"url": "json://localhost/a", "tiers": ["normal"]}],
+    }
+    tui.save()
     sem.reload_settings()
     assert sem.config.min_severity == "low" and any(sem.alerter.notifier.find("normal"))
+
+
+def test_scanning_ids_are_visible_to_the_tui_until_batch_ends(tmp_path):
+    from semaphore.app import Semaphore
+
+    sem = Semaphore(Config(data_dir=tmp_path))
+    tui = State(tmp_path, readonly=True)
+
+    sem.mark_scanning(["a", "b"])
+    sem.mark_scanning(["a"])
+    assert tui.scanning == ["a", "b"]
+    sem.end_of_batch()
+    assert tui.scanning == [] and not sem.scanning
 
 
 def test_tui_double_ctrl_c_quits(tmp_path, monkeypatch):
@@ -475,7 +487,7 @@ def candidate_without_kev():
 
 
 def test_update_check_scans_newer_tag_once_and_reports_fixes(tmp_path, monkeypatch):
-    import semaphore.updates as updates
+    from semaphore import updates
     from semaphore.scan import Scanner
 
     calls = []
@@ -599,18 +611,27 @@ def test_rescan_request_discards_and_rescans_running_images(tmp_path):
 
     sem.host = Host()
     sem.process_image = lambda img_id, info, **kw: rescanned.append(img_id)
+
     sem.config.sbom_dir.mkdir()
 
     sbom = sem.scanner.artifact(IMG, "syft.json")
 
     sbom.write_text("{}")
     sem.state.record_scan(IMG, "img:1", [], counts, found)
-    sem.config.rescan_path.write_text(json.dumps({"images": [IMG]}))
-    sem.check_requests()
-    assert not sem.config.rescan_path.exists()
+    sem.state.save()
+
+    tui = State(tmp_path)
+
+    tui.request_rescan([IMG])
+    tui.request_rescan(["sha256:other"])  # merged, not taken yet
+    assert tui.rescan_request == {"images": [IMG, "sha256:other"]}
+    sem.check_requests(State(tmp_path))
+    assert tui.rescan_request is None
+    assert sem.tasks.get_nowait() == ("discard", [IMG, "sha256:other"])
+    tui.request_rescan([IMG])
+    sem.check_requests(State(tmp_path))
     sem.handle(sem.tasks.get_nowait())
     assert IMG not in sem.state and not sbom.exists() and rescanned == []
-
     sem.state.record_scan(IMG, "img:1", [], counts, found)
     sem.handle(("discard", None))  # all: stored and running images
     assert IMG not in sem.state and rescanned == ["sha256:run"]
@@ -646,34 +667,35 @@ def test_tui_lists_images_and_requests_rescan_after_confirm(tmp_path, monkeypatc
 
             assert row[1] == "httpd:2.4.49" and row[3].startswith("C:")
             assert row[4] == "httpd:2.4.69 (fixes 1)" and row[5] == "H:2 | M:1"
-
             app.query_one("TabbedContent").active = "images"
             await pilot.pause()
             table.focus()
             await pilot.press("space")  # tick the row
             assert app.selected == {IMG}
-
             await pilot.press("enter")  # CVE dialog
             await pilot.pause()
             assert isinstance(app.screen, Findings)
+
             cves = app.screen.query_one("DataTable").get_column_at(0)
+
             assert any("(fixed in httpd:2.4.69)" in str(c) for c in cves)
             await pilot.press("escape")
             await pilot.pause()
             assert app.selected == {IMG}
-
             app.rescan_selected()
             await pilot.pause()
             assert isinstance(app.screen, Confirm)
             await pilot.press("enter")  # Cancel has focus
             await pilot.pause()
-            assert not app.config.rescan_path.exists()
-
+            assert State(tmp_path, readonly=True).rescan_request is None
             app.rescan_selected()
             await pilot.pause()
             await pilot.click("#yes")
             await pilot.pause()
+            assert app.scanning == {
+                IMG
+            }  # spinner + yellow row until the daemon is done
+            assert table.get_row(IMG)[1].endswith(" httpd:2.4.49")
 
     asyncio.run(run())
-
-    assert json.loads((tmp_path / "rescan.json").read_text()) == {"images": [IMG]}
+    assert State(tmp_path, readonly=True).rescan_request == {"images": [IMG]}

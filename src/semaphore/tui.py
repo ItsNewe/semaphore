@@ -1,17 +1,16 @@
-"""Terminal UI to edit settings.json (tier rules and Apprise targets), list scanned images, request rescans,
+"""Terminal UI to edit settings (tier rules and Apprise targets), list scanned images, request rescans,
 re-send the last batch and send test alerts
 
-Reads semaphore.db read-only. Rescans are requested through <data_dir>/rescan.json, picked up by the daemon
 
 Run inside the container: docker exec -it semaphore semaphore-tui
-The daemon picks up saved settings before its next task, no restart needed
+The daemon picks up saved settings before its next task
 With TUI_RELOAD set (make tui), source edits restart the TUI
 """
 
 from __future__ import annotations
 
-import json
 import os
+import sqlite3
 import sys
 import time
 from datetime import datetime
@@ -19,6 +18,8 @@ from pathlib import Path
 from typing import ClassVar
 
 import apprise
+from rich.spinner import Spinner
+from rich.style import Style
 from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -48,6 +49,15 @@ from .util import plural, rank
 
 SEVERITIES = list(reversed(SEV_RANK))  # critical first
 RELOAD = "reload"  # App.run() result asking main() to restart with fresh code
+FRAMES = Spinner("dots").frames
+SCANNING = Style(color="black", bgcolor="yellow")
+
+
+def mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
 
 
 def source_mtimes() -> dict[Path, float]:
@@ -216,13 +226,27 @@ class Findings(ModalScreen):
 
 
 class ImageTable(DataTable):
-    BINDINGS: ClassVar[list] = [Binding("space", "tick", "Tick")]
+    BINDINGS: ClassVar[list] = [
+        Binding("space", "tick", "Tick"),
+        Binding("enter", "select_cursor", "Show details"),
+    ]
 
     def action_tick(self) -> None:
         if self.row_count:
             self.app.toggle_image(
                 self.coordinate_to_cell_key(self.cursor_coordinate).row_key
             )
+
+    def _get_row_style(self, row_index: int, base_style: Style) -> Style:
+        style = super()._get_row_style(row_index, base_style)
+
+        if (
+            row_index >= 0
+            and self.ordered_rows[row_index].key.value in self.app.scanning
+        ):
+            return style + SCANNING
+
+        return style
 
 
 class SemaphoreTUI(App):
@@ -255,9 +279,15 @@ class SemaphoreTUI(App):
         super().__init__()
 
         self.base = Config.from_env()
-        self.config = self.base.apply_settings()
+        self.config = self.base.apply_settings(
+            State(self.base.data_dir, readonly=True).settings
+        )
         self.last_ctrl_c = 0.0
         self.selected: set[str] = set()  # image ids ticked in the Images tab
+        self.scanning: set[str] = set()  # image ids the daemon is scanning or asked to
+        self.names: dict[str, str] = {}  # image id -> name shown in the Images tab
+        self.db_stamp: tuple | None = None
+        self.frame = 0
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -303,7 +333,6 @@ class SemaphoreTUI(App):
                         "Rescan selected", variant="warning", id="rescan-selected"
                     )
                     yield Button("Rescan all", variant="error", id="rescan-all")
-                    yield Button("Refresh", id="refresh-images")
 
             with TabPane("Resend", id="resend"):
                 yield Static(id="last-batch")
@@ -355,9 +384,12 @@ class SemaphoreTUI(App):
         table = self.query_one("#image-table", DataTable)
 
         table.add_column("✓", key="sel")
-        table.add_columns("Image", "Scanned", "Findings", "Update", "After update")
-        self.show_images()
+        table.add_column("Image", key="name")
+        table.add_columns("Scanned", "Findings", "Update", "After update")
+        self.poll()
         self.show_last_batch()
+        self.set_interval(1, self.poll)
+        self.set_interval(0.08, self.spin)
 
         if os.getenv("TUI_RELOAD"):
             self.mtimes = source_mtimes()
@@ -413,23 +445,64 @@ class SemaphoreTUI(App):
             "epss_threshold": epss,
             "targets": targets,
         }
-        path = self.base.settings_path
-        tmp = path.with_suffix(".tmp")
 
-        tmp.write_text(json.dumps(settings, indent=2))
-        tmp.replace(path)
+        try:
+            state = State(self.base.data_dir)
+            state.settings = settings
 
-        self.config = self.base.apply_settings()
+            state.save()
+        except sqlite3.OperationalError as e:  # daemon holding the write lock too long
+            self.notify(f"Settings not saved: {e}", severity="error")
 
-        self.notify(f"Saved {path}")
+            return
+
+        self.config = self.base.apply_settings(settings)
+
+        self.notify("Settings saved")
 
     # ------------------------------------------------------------ images
 
-    @on(Button.Pressed, "#refresh-images")
+    def poll(self) -> None:
+        """Refreshes the Images tab when the DB changes (scan done, scan started, rescan requested)"""
+
+        db = self.base.data_dir / "semaphore.db"
+        stamp = (mtime(db), mtime(db.with_name("semaphore.db-wal")))
+
+        if stamp != self.db_stamp:
+            self.db_stamp = stamp
+
+            self.show_images()
+
+    def image_label(self, img_id: str) -> str:
+        name = self.names[img_id]
+
+        return f"{FRAMES[self.frame]} {name}" if img_id in self.scanning else name
+
+    def spin(self) -> None:
+        table = self.query_one("#image-table", DataTable)
+        spinning = self.scanning & self.names.keys()
+
+        if not spinning:
+            return
+
+        self.frame = (self.frame + 1) % len(FRAMES)
+
+        for img_id in spinning:
+            table.update_cell(img_id, "name", self.image_label(img_id))
+
     def show_images(self) -> None:
         table = self.query_one("#image-table", DataTable)
-        rows = State(self.base.data_dir, readonly=True).rows()
+        state = State(self.base.data_dir, readonly=True)
+        rows = state.rows()
+        pending = (state.rescan_request or {"images": []})["images"]
         self.selected &= {r["id"] for r in rows}
+        self.names = {r["id"]: r["name"] or r["id"] for r in rows}
+        self.scanning = {*state.scanning, *(self.names if pending is None else pending)}
+        cursor = (
+            table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            if table.row_count
+            else None
+        )
 
         table.clear()
 
@@ -438,13 +511,16 @@ class SemaphoreTUI(App):
 
             table.add_row(
                 "✓" if r["id"] in self.selected else "",
-                r["name"] or r["id"],
+                self.image_label(r["id"]),
                 local_time(r["last_scan"]),
                 short_counts(r["counts"] or {}),
                 f"{u['ref']} (fixes {len(u['fixes'])})" if u else "—",
                 (short_counts(u["counts"]) if "counts" in u else "?") if u else "",
                 key=r["id"],
             )
+
+        if cursor is not None and cursor.value in self.names:
+            table.move_cursor(row=table.get_row_index(cursor))
 
     def toggle_image(self, row_key) -> None:
         img_id = row_key.value
@@ -496,20 +572,15 @@ class SemaphoreTUI(App):
         )
 
     def request_rescan(self, ids: list[str] | None) -> None:
-        """Writes rescan.json, merged with a request the daemon hasn't picked up yet. None = all images"""
-
-        path = self.base.rescan_path
+        """Stores the rescan request, merged with one the daemon hasn't picked up yet. None = all images"""
 
         try:
-            pending = json.loads(path.read_text())["images"]
-        except (OSError, ValueError, KeyError, TypeError):
-            pending = []
+            State(self.base.data_dir).request_rescan(ids)
+        except sqlite3.OperationalError as e:  # daemon holding the write lock too long
+            self.notify(f"Rescan not requested: {e}", severity="error")
 
-        images = None if ids is None or pending is None else sorted({*pending, *ids})
-        tmp = path.with_suffix(".tmp")
+            return
 
-        tmp.write_text(json.dumps({"images": images}))
-        tmp.replace(path)
         self.selected.clear()
         self.show_images()
         self.notify("Rescan requested, the daemon starts it within seconds")

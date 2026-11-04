@@ -1,8 +1,7 @@
-"""Settings from the environment, overridable by <data_dir>/settings.json (edited with semaphore-tui)"""
+"""Settings from the environment, overridable by the settings stored in db"""
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -59,7 +58,7 @@ class Config:
     grype_config: Path = Path("/config/grype.yaml")
     exclude: re.Pattern | None = None
     targets: tuple | None = (
-        None  # ((url, tiers), ...) from settings.json, None = use the APPRISE_URLS* env vars
+        None  # ((url, tiers), ...) from the TUI settings, None = use the APPRISE_URLS* env vars
     )
 
     def __post_init__(self) -> None:
@@ -78,22 +77,13 @@ class Config:
     def report_dir(self) -> Path:
         return self.data_dir / "reports"
 
-    @property
-    def settings_path(self) -> Path:
-        return self.data_dir / "settings.json"
+    def apply_settings(self, s: dict | None) -> Config:
+        """This config overridden by the TUI settings (State.settings). None or unusable = no override"""
 
-    @property
-    def rescan_path(self) -> Path:
-        """Rescan request written by the TUI: {"images": [image ids] or null for all}"""
-
-        return self.data_dir / "rescan.json"
-
-    def apply_settings(self) -> Config:
-        """This config overridden by <data_dir>/settings.json (written by the TUI). Unusable file = no override"""
+        if s is None:
+            return self
 
         try:
-            s = json.loads(self.settings_path.read_text())
-
             return replace(
                 self,
                 min_severity=str(s.get("min_severity", self.min_severity)).lower(),
@@ -104,22 +94,19 @@ class Config:
                     else self.targets
                 ),
             )
-        except FileNotFoundError:
-            return self
         except (
-            OSError,
             ValueError,
             TypeError,
             KeyError,
             AttributeError,
             SystemExit,
         ) as e:
-            log.warning("Ignoring %s: %s", self.settings_path, e)
+            log.warning("Ignoring the TUI settings: %s", e)
 
             return self
 
     def routes(self) -> list[tuple[str, tuple[str, ...]]]:
-        """(Apprise URLs, tier tags) pairs. Without settings.json targets, APPRISE_URLS gets urgent too
+        """(Apprise URLs, tier tags) pairs. Without TUI targets, APPRISE_URLS gets urgent too
         unless APPRISE_URLS_URGENT is set"""
 
         if self.targets is not None:

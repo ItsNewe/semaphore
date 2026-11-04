@@ -97,9 +97,6 @@ docker exec -it semaphore semaphore-tui
   daemon rescans them as new within seconds and alerts every current finding again
 - **Test**: sends a fake alert with the chosen severities and tier
 
-Saving (`ctrl+s`) writes `/data/settings.json`, which overrides the matching env vars. The daemon picks it up at its next task (at most `RECONCILE_INTERVAL_SECONDS`, 5 min),
-no restart needed. Delete the file to go back to the env vars.
-
 ## Ignoring CVEs
 
 Mount a Grype config at `/config/grype.yaml`:
