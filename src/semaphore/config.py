@@ -87,6 +87,10 @@ class Config:
     def report_dir(self) -> Path:
         return self.data_dir / "reports"
 
+    @property
+    def socket_path(self) -> Path:
+        return self.data_dir / "semaphore.sock"
+
     def next_rescan(self, after: float) -> float:
         """Next scheduled rescan after a timestamp, in local time (TZ)"""
 

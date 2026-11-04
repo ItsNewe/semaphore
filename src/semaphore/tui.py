@@ -3,15 +3,20 @@ re-send the last batch and send test alerts
 
 
 Run inside the container: docker exec -it semaphore semaphore-tui
-The daemon picks up saved settings before its next task
+Talks to the daemon over its socket (bus.py): status pushed for the Images tab and the footer,
+rescan requests and "settings saved" sent back. Data is read from semaphore.db
 With TUI_RELOAD set (make tui), source edits restart the TUI
 """
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
+import socket
 import sqlite3
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -52,13 +57,6 @@ RELOAD = "reload"  # App.run() result asking main() to restart with fresh code
 FRAMES = Spinner("dots").frames
 SCANNING = Style(color="black", bgcolor="yellow")
 SCANNING_CURSOR = Style(color="black", bgcolor="bright_yellow", bold=True)
-
-
-def mtime(path: Path) -> float | None:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return None
 
 
 def source_mtimes() -> dict[Path, float]:
@@ -294,6 +292,8 @@ class SemaphoreTUI(App):
     .setting > Dropdown, .setting > Input, .setting > Checklist { width: 28; }
     #test-severities { height: auto; }
     #image-table { height: auto; max-height: 24; }
+    TabbedContent { height: 1fr; }
+    #status { height: 1; padding: 0 1; }
     Button { min-width: 0; height: 1; padding: 0; margin-right: 1; border: none !important; }
     Button:last-child { margin-right: 0; }
     TabPane > Button { margin-top: 1; }
@@ -311,7 +311,11 @@ class SemaphoreTUI(App):
         self.scanning: set[str] = set()  # image ids the daemon is scanning or asked to
         self.names: dict[str, str] = {}  # image id -> name shown in the Images tab
         self.rows: list[dict] = []  # rows shown in the Images tab
-        self.db_stamp: tuple | None = None
+        self.daemon: dict | None = (
+            None  # last status pushed by the daemon, None = not connected
+        )
+        self.conn: socket.socket | None = None
+        self.closing = threading.Event()  # stops listen()
         self.frame = 0
 
     def compose(self) -> ComposeResult:
@@ -394,6 +398,7 @@ class SemaphoreTUI(App):
 
                 yield Button("Send test", variant="primary", id="test-btn")
 
+        yield Static(id="status")
         yield Footer()
 
     def action_ctrl_c(self) -> None:
@@ -412,20 +417,29 @@ class SemaphoreTUI(App):
         self.notify("Press ctrl+c again to quit", timeout=1)
 
     def on_mount(self) -> None:
-        table = self.query_one("#image-table", DataTable)
+        table = self.table = self.query_one("#image-table", DataTable)
 
         table.add_column("✓", key="sel")
         table.add_column("Image", key="name")
         table.add_columns("Scanned", "Findings", "Update", "After update")
-        self.poll()
+        # kept: query_one looks in the active screen, a modal when a status push lands
+        self.status_bar = self.query_one("#status", Static)
+        self.show_images()
+        self.show_status()
         self.show_last_batch()
-        self.set_interval(1, self.poll)
         self.set_interval(0.08, self.spin)
+        self.listen()
 
         if os.getenv("TUI_RELOAD"):
             self.mtimes = source_mtimes()
 
             self.set_interval(1, self.reload_if_changed)
+
+    def on_unmount(self) -> None:
+        self.closing.set()
+
+        with contextlib.suppress(AttributeError, OSError):  # not connected
+            self.conn.shutdown(socket.SHUT_RDWR)  # unblocks listen()
 
     def reload_if_changed(self) -> None:
         if source_mtimes() != self.mtimes:
@@ -498,23 +512,79 @@ class SemaphoreTUI(App):
             return
 
         self.config = self.base.apply_settings(settings)
+        applied = (
+            "" if self.tell({"settings": True}) else ", applied when the daemon starts"
+        )
 
         self.notify(
-            f"Settings saved, next rescan {time.ctime(self.config.next_rescan(time.time()))}"
+            f"Settings saved{applied}, next rescan {time.ctime(self.config.next_rescan(time.time()))}"
         )
 
     # ------------------------------------------------------------ images
 
-    def poll(self) -> None:
-        """Refreshes the Images tab when the DB changes (scan done, scan started, rescan requested)"""
+    @work(thread=True, exclusive=True, group="daemon")
+    def listen(self) -> None:
+        """Follows the status the daemon pushes, reconnecting while it's down"""
 
-        db = self.base.data_dir / "semaphore.db"
-        stamp = (mtime(db), mtime(db.with_name("semaphore.db-wal")))
+        while not self.closing.is_set():
+            try:
+                with socket.socket(socket.AF_UNIX) as conn:
+                    conn.connect(str(self.base.socket_path))
+                    self.conn = conn
 
-        if stamp != self.db_stamp:
-            self.db_stamp = stamp
+                    # settings saved while disconnected, a no-op when unchanged
+                    self.tell({"settings": True})
 
-            self.show_images()
+                    for raw in conn.makefile("rb"):
+                        self.call_from_thread(self.on_daemon, json.loads(raw))
+            except (OSError, ValueError):
+                pass
+
+            self.conn = None
+
+            if self.closing.is_set():
+                return
+
+            self.call_from_thread(self.on_daemon, None)
+            # retries every 2 s only while the daemon is down
+            self.closing.wait(2)
+
+    def on_daemon(self, status: dict | None) -> None:
+        if status is None and self.daemon is None:
+            return
+
+        self.daemon = status
+
+        self.show_images()
+        self.show_status()
+
+    def tell(self, msg: dict) -> bool:
+        """Sends msg to the daemon, False when it isn't connected"""
+
+        try:
+            self.conn.sendall(json.dumps(msg).encode() + b"\n")
+        except (AttributeError, OSError):
+            return False
+
+        return True
+
+    def show_status(self) -> None:
+        a = (self.daemon or {}).get("activity")
+
+        if self.daemon is None:
+            text = Text("Daemon not running", style="red")
+        elif a is None:
+            text = Text("Idle", style="dim")
+        else:
+            parts = [
+                *([a["image"]] if a["image"] else []),
+                a["stage"],
+                f"{int(time.time() - a['since'])}s",
+                *([f"{a['left']} left"] if a["left"] > 1 else []),
+            ]
+            text = Text(f"{FRAMES[self.frame]} {' · '.join(parts)}")
+
+        self.status_bar.update(text)
 
     def image_label(self, img_id: str) -> str:
         name = self.names[img_id]
@@ -522,31 +592,39 @@ class SemaphoreTUI(App):
         return f"{FRAMES[self.frame]} {name}" if img_id in self.scanning else name
 
     def spin(self) -> None:
-        table = self.query_one("#image-table", DataTable)
+        table = self.table
         spinning = self.scanning & self.names.keys()
+        active = (self.daemon or {}).get("activity")
 
-        if not spinning:
+        if not spinning and not active:
             return
 
         self.frame = (self.frame + 1) % len(FRAMES)
+
+        if active:
+            self.show_status()
 
         for img_id in spinning:
             table.update_cell(img_id, "name", self.image_label(img_id))
 
     def show_images(self) -> None:
-        table = self.query_one("#image-table", DataTable)
+        table = self.table
         state = State(self.base.data_dir, readonly=True)
         rows = state.rows()
-        pending = (state.rescan_request or {"images": []})["images"]
-        scanning = {*state.scanning, *(pending or ())}
+        daemon = self.daemon or {"scanning": [], "pending": []}
+        pending = daemon["pending"]
+        scanning = {*daemon["scanning"], *(pending or ())}
         in_db = {r["id"] for r in rows}
+
         # a discarded image leaves the DB until its new scan lands: keep showing its old row meanwhile
         rows += [
             r
             for r in self.rows
             if r["id"] not in in_db and (pending is None or r["id"] in scanning)
         ]
+
         rows.sort(key=row_order)
+
         self.rows = rows
         self.names = {r["id"]: r["name"] or r["id"] for r in rows}
         self.selected &= self.names.keys()
@@ -579,9 +657,7 @@ class SemaphoreTUI(App):
         img_id = row_key.value
         self.selected ^= {img_id}
 
-        self.query_one("#image-table", DataTable).update_cell(
-            row_key, "sel", "✓" if img_id in self.selected else ""
-        )
+        self.table.update_cell(row_key, "sel", "✓" if img_id in self.selected else "")
 
     @on(DataTable.RowSelected, "#image-table")
     def show_findings(self, event: DataTable.RowSelected) -> None:
@@ -625,18 +701,16 @@ class SemaphoreTUI(App):
         )
 
     def request_rescan(self, ids: list[str] | None) -> None:
-        """Stores the rescan request, merged with one the daemon hasn't picked up yet. None = all images"""
+        """Asks the daemon to rescan, it merges requests it hasn't started yet. None = all images"""
 
-        try:
-            State(self.base.data_dir).request_rescan(ids)
-        except sqlite3.OperationalError as e:  # daemon holding the write lock too long
-            self.notify(f"Rescan not requested: {e}", severity="error")
+        if not self.tell({"rescan": ids}):
+            self.notify("Daemon not running, rescan not requested", severity="error")
 
             return
 
         self.selected.clear()
         self.show_images()
-        self.notify("Rescan requested, the daemon starts it within seconds")
+        self.notify("Rescan requested")
 
     # ------------------------------------------------------------ sending
 

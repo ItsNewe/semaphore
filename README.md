@@ -94,8 +94,11 @@ docker exec -it semaphore semaphore-tui
 - **Resend**: re-sends the latest notification batch to the saved targets
 - **Images**: every scanned image with its scan time, counts (`C:2 | H:5`), fixing update and counts once applied.
   **Rescan selected** / **Rescan all** (after a confirmation) discard the SBOMs, results and alert history, so the
-  daemon rescans them as new within seconds and alerts every current finding again
+  daemon rescans them as new and alerts every current finding again
 - **Test**: sends a fake alert with the chosen severities and tier
+
+The bottom line shows what the daemon is doing (image, stage, elapsed time, images left) or that it isn't running.
+The TUI talks to the daemon through `semaphore.sock` in the data volume, so run it in the daemon's container
 
 ## Ignoring CVEs
 

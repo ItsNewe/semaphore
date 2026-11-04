@@ -1,4 +1,8 @@
 import json
+import queue
+import socket
+import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +30,29 @@ IMG = "sha256:abc"
 
 def parse(cfg=Config()):
     return parse_matches(SAMPLE, cfg.min_rank, cfg.epss_threshold)[:2]
+
+
+@pytest.fixture
+def sock(monkeypatch):
+    """Socket path short enough for AF_UNIX (104 bytes on macOS, pytest's tmp_path can be longer)"""
+
+    path = Path(tempfile.mkdtemp(dir="/tmp")) / "s.sock"
+
+    monkeypatch.setattr(Config, "socket_path", property(lambda self: path))
+
+    return path
+
+
+async def until(pilot, cond) -> None:
+    """Waits for something pushed over the socket to land in the TUI"""
+
+    for _ in range(100):
+        if cond():
+            return
+
+        await pilot.pause(0.02)
+
+    raise AssertionError("timed out")
 
 
 def test_parse_matches_tiers():
@@ -421,17 +448,51 @@ def test_daemon_reloads_settings_when_tui_changes_them(tmp_path):
     assert sem.config.min_severity == "low" and any(sem.alerter.notifier.find("normal"))
 
 
-def test_scanning_ids_are_visible_to_the_tui_until_batch_ends(tmp_path):
+def test_daemon_status_is_pushed_until_batch_ends(tmp_path):
     from semaphore.app import Semaphore
 
     sem = Semaphore(Config(data_dir=tmp_path))
-    tui = State(tmp_path, readonly=True)
 
     sem.mark_scanning(["a", "b"])
     sem.mark_scanning(["a"])
-    assert tui.scanning == ["a", "b"]
+    sem.status("generating SBOM", "httpd:2.4.49")
+    assert sem.bus.status["scanning"] == ["a", "b"]
+    assert sem.bus.status["activity"]["stage"] == "generating SBOM"
+    assert sem.bus.status["activity"]["left"] == 2
     sem.end_of_batch()
-    assert tui.scanning == [] and not sem.scanning
+    assert sem.bus.status == {"scanning": [], "pending": [], "activity": None}
+    assert not sem.scanning
+
+
+def test_bus_pushes_status_and_queues_tui_requests(sock):
+    from semaphore.bus import Bus
+
+    tasks = queue.Queue()
+    bus = Bus(sock, tasks)
+
+    bus.start()
+
+    with socket.socket(socket.AF_UNIX) as c:
+        c.connect(str(sock))
+
+        f = c.makefile("rb")
+
+        def recv():
+            return json.loads(f.readline())
+
+        assert recv() == {"scanning": [], "pending": [], "activity": None}
+        bus.publish(scanning=["a"])
+        assert recv()["scanning"] == ["a"]
+        c.sendall(b'{"rescan": ["b"]}\n{"rescan": ["c"]}\n{"settings": true}\n')
+        assert recv()["pending"] == ["b"]
+        assert recv()["pending"] == ["b", "c"]
+        # one discard for requests merged before it runs
+        assert tasks.get(timeout=1) == ("discard",)
+        assert tasks.get(timeout=1) == ("settings",)
+        assert bus.take_pending() == ["b", "c"] and bus.status["pending"] == []
+        c.sendall(b'{"rescan": null}\n')
+        assert recv()["pending"] is None
+        assert tasks.get(timeout=1) == ("discard",)
 
 
 def test_tui_double_ctrl_c_quits(tmp_path, monkeypatch):
@@ -633,26 +694,21 @@ def test_rescan_request_discards_and_rescans_running_images(tmp_path):
     sem.state.record_scan(IMG, "img:1", [], counts, found)
     sem.state.save()
 
-    tui = State(tmp_path)
-
-    tui.request_rescan([IMG])
-    tui.request_rescan(["sha256:other"])  # merged, not taken yet
-    assert tui.rescan_request == {"images": [IMG, "sha256:other"]}
-    sem.check_requests(State(tmp_path))
-    assert tui.rescan_request is None
-    assert sem.tasks.get_nowait() == ("discard", [IMG, "sha256:other"])
-    tui.request_rescan([IMG])
-    sem.check_requests(State(tmp_path))
+    sem.bus.receive({"rescan": [IMG]})
     sem.handle(sem.tasks.get_nowait())
     assert IMG not in sem.state and not sbom.exists() and rescanned == []
     sem.state.record_scan(IMG, "img:1", [], counts, found)
-    sem.handle(("discard", None))  # all: stored and running images
+    sem.bus.receive({"rescan": None})  # all: stored and running images
+    sem.handle(sem.tasks.get_nowait())
     assert IMG not in sem.state and rescanned == ["sha256:run"]
 
 
-def test_tui_lists_images_and_requests_rescan_after_confirm(tmp_path, monkeypatch):
+def test_tui_lists_images_and_requests_rescan_after_confirm(
+    tmp_path, monkeypatch, sock
+):
     import asyncio
 
+    from semaphore.bus import Bus
     from semaphore.tui import Confirm, Findings, SemaphoreTUI
 
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
@@ -671,10 +727,19 @@ def test_tui_lists_images_and_requests_rescan_after_confirm(tmp_path, monkeypatc
     state.record_scan(IMG, "httpd:2.4.49", ["web"], counts, found, update)
     state.save()
 
+    tasks = queue.Queue()
+    bus = Bus(sock, tasks)
+
+    bus.start()
+
     async def run():
         app = SemaphoreTUI()
 
         async with app.run_test() as pilot:
+            await until(pilot, lambda: app.daemon is not None)
+            assert str(app.query_one("#status").content) == "Idle"
+            assert tasks.get(timeout=1) == ("settings",)  # sent on connect
+
             table = app.query_one("#image-table")
             row = table.get_row(IMG)
 
@@ -700,18 +765,36 @@ def test_tui_lists_images_and_requests_rescan_after_confirm(tmp_path, monkeypatc
             assert isinstance(app.screen, Confirm)
             await pilot.press("enter")  # Cancel has focus
             await pilot.pause()
-            assert State(tmp_path, readonly=True).rescan_request is None
+            assert tasks.empty()
             app.rescan_selected()
             await pilot.pause()
             await pilot.click("#yes")
-            await pilot.pause()
-            assert app.scanning == {
-                IMG
-            }  # spinner + yellow row until the daemon is done
+            # spinner + yellow row until the daemon is done
+            await until(pilot, lambda: app.scanning == {IMG})
             assert table.get_row(IMG)[1].endswith(" httpd:2.4.49")
 
     asyncio.run(run())
-    assert State(tmp_path, readonly=True).rescan_request == {"images": [IMG]}
+    assert tasks.get_nowait() == ("discard",) and bus.status["pending"] == [IMG]
+
+
+def test_tui_without_daemon_says_so_and_refuses_rescans(tmp_path, monkeypatch, sock):
+    import asyncio
+
+    from semaphore.tui import SemaphoreTUI
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    async def run():
+        app = SemaphoreTUI()
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert str(app.query_one("#status").content) == "Daemon not running"
+            app.request_rescan(None)
+            await pilot.pause()
+            assert not app.scanning
+
+    asyncio.run(run())
 
 
 def test_next_rescan_follows_cron_in_local_time():
@@ -728,9 +811,10 @@ def test_next_rescan_follows_cron_in_local_time():
         Config(rescan_schedule="nope")
 
 
-def test_tui_keeps_discarded_row_until_its_new_scan_lands(tmp_path, monkeypatch):
+def test_tui_keeps_discarded_row_until_its_new_scan_lands(tmp_path, monkeypatch, sock):
     import asyncio
 
+    from semaphore.bus import Bus
     from semaphore.tui import SemaphoreTUI
 
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
@@ -741,36 +825,48 @@ def test_tui_keeps_discarded_row_until_its_new_scan_lands(tmp_path, monkeypatch)
     daemon.record_scan(IMG, "httpd:2.4.49", ["web"], counts, found, None)
     daemon.save()
 
+    bus = Bus(sock, queue.Queue())
+
+    bus.start()
+
     async def run():
         app = SemaphoreTUI()
 
         async with app.run_test() as pilot:
             table = app.query_one("#image-table")
+            status = app.query_one("#status")
 
-            async def refresh():
-                app.poll()
-                await pilot.pause()
-
-            await refresh()
+            await until(pilot, lambda: app.daemon is not None)
             app.request_rescan([IMG])
-            daemon.take_rescan()  # what Semaphore.discard does
-            daemon.scanning = [IMG]
+            await until(pilot, lambda: IMG in app.scanning)
+
+            bus.take_pending()  # what Semaphore.discard does, then mark_scanning + forget
             daemon.forget(IMG)
             daemon.save()
-            await refresh()
+            bus.publish(
+                scanning=[IMG],
+                activity={
+                    "stage": "generating SBOM",
+                    "image": "httpd:2.4.49",
+                    "since": time.time(),
+                    "left": 1,
+                },
+            )
+            await until(pilot, lambda: "generating SBOM" in str(status.content))
             assert table.get_row(IMG)[1].endswith("httpd:2.4.49")  # old row, spinning
             assert IMG in app.scanning
+            assert str(status.content)[2:] == "httpd:2.4.49 · generating SBOM · 0s"
 
             daemon.record_scan(IMG, "httpd:2.4.49", ["web"], {}, {}, None)
-            daemon.scanning = []
             daemon.save()
-            await refresh()
+            bus.publish(scanning=[], activity=None)
+            await until(pilot, lambda: IMG not in app.scanning)
             assert table.get_row(IMG)[3] == "clean"  # new scan
-            assert IMG not in app.scanning
+            assert str(status.content) == "Idle"
 
             daemon.forget(IMG)  # gone for good once nothing scans it
             daemon.save()
-            await refresh()
-            assert table.row_count == 0
+            bus.publish()
+            await until(pilot, lambda: table.row_count == 0)
 
     asyncio.run(run())

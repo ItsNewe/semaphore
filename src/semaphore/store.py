@@ -1,8 +1,8 @@
 """Persistent scan state in <data_dir>/semaphore.db (SQLite) and the human-readable summary.json
 
 Tables: images (latest scan per image), findings (every finding of that scan, alertable flag, highest tier
-alerted), scans (append-only log of every scan with the finding keys added and removed), meta (also
-how the TUI and the daemon talk: settings, rescan request, images being scanned)
+alerted), scans (append-only log of every scan with the finding keys added and removed), meta (settings
+saved by the TUI, last rescan, last batch)
 
 The daemon commits after each image so the TUI sees scans as they finish. A failed send rolls its marks
 back at the end of the batch
@@ -392,49 +392,3 @@ class State:
     @settings.setter
     def settings(self, settings: dict) -> None:
         self.set_meta("settings", settings)
-
-    @property
-    def scanning(self) -> list[str]:
-        """Image ids the daemon is scanning in the current batch"""
-
-        return self.get_meta("scanning") or []
-
-    @scanning.setter
-    def scanning(self, ids: list[str]) -> None:
-        self.set_meta("scanning", ids)
-
-    @property
-    def rescan_request(self) -> dict | None:
-        """{"images": [ids] or None for all} written by the TUI, not taken by the daemon yet"""
-
-        return self.get_meta("rescan")
-
-    def request_rescan(self, ids: list[str] | None) -> None:
-        """Merges ids into the pending rescan request and commits. None = every image"""
-
-        self.db.execute(
-            "BEGIN IMMEDIATE"
-        )  # no take_rescan between the read and the write
-
-        pending = (self.rescan_request or {"images": []})["images"]
-
-        self.set_meta(
-            "rescan",
-            {
-                "images": None
-                if ids is None or pending is None
-                else sorted({*pending, *ids})
-            },
-        )
-        self.save()
-
-    def take_rescan(self) -> dict | None:
-        """Pops the pending rescan request, in one statement so a request written meanwhile isn't lost"""
-
-        row = self.db.execute(
-            "DELETE FROM meta WHERE key = 'rescan' RETURNING value"
-        ).fetchone()
-
-        self.save()
-
-        return json.loads(row[0]) if row else None
