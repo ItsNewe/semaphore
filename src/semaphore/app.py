@@ -5,7 +5,7 @@ for every image that is actually running on this Docker host
   container `start` event (optionally image `pull`)  -> unseen image? -> SBOM + scan
   every RECONCILE_INTERVAL_SECONDS                    -> catch anything the event stream missed
   on RESCAN_SCHEDULE (cron)                           -> refresh Grype DB, re-match stored SBOMs
-  rescan request from the TUI (bus.py socket)         -> discard scans + alert marks, rescan as new
+  rescan request from the TUI (bus.py socket)         -> regenerate SBOMs + rescan, alert marks kept
 
 Vulnerable images also get an update check on each scan: is the same tag rebuilt upstream, or is there
 a newer version tag, and which findings would it fix (updates.py)
@@ -57,6 +57,7 @@ class Semaphore:
         self.tasks: queue.Queue[tuple] = queue.Queue()
         self.scanning: set[str] = set()  # images left in the batch, pushed to the TUI
         self.bus = Bus(config.socket_path, self.tasks)
+
         # Runs Semaphore.analyze: syft/grype/crane subprocesses, nothing touching State
         self.pool = ThreadPoolExecutor(config.scan_workers, thread_name_prefix="scan")
         self.host: DockerHost | None = (
@@ -124,19 +125,23 @@ class Semaphore:
     def commit(self, job: tuple, result: tuple) -> None:
         """Stores a scan and queues its alerts, on the worker thread"""
 
-        image_id, info, _, name, is_new = job
+        image_id, info, _, name, _ = job
         found, counts, rest, update = result
 
         if update is False:
             update = self.state.update(image_id)  # keep the last known result
 
         before = self.state.alerted(image_id)
+
+        # not "no SBOM": a TUI rescan regenerates it but the image isn't new
+        first = image_id not in self.state
         new = self.state.new_findings(image_id, found)
         containers = sorted(info.get("containers", ()))
 
         self.state.record_scan(image_id, name, containers, counts, found, update, rest)
         self.scanning.discard(image_id)
         self.state.save()
+
         # TUI reloads the committed scan
         self.bus.publish(scanning=sorted(self.scanning))
 
@@ -165,7 +170,7 @@ class Semaphore:
                     image_id,
                     name,
                     containers,
-                    is_new,
+                    first,
                     new,
                     {k: before.get(k) for k in new},
                     update,
@@ -217,7 +222,8 @@ class Semaphore:
                 p.unlink(missing_ok=True)
 
     def discard(self, ids: list[str] | None) -> None:
-        """Forgets scans, SBOMs and alert marks, then rescans the running ones as new. ids None = every image"""
+        """Deletes SBOMs and rescans the running images from scratch. Their alert marks stay, so only new or
+        escalated findings alert. Stored images not running are forgotten. ids None = every image"""
 
         running = self.host.running_images()
         targets = set(self.state.ids()) | set(running) if ids is None else ids
@@ -226,8 +232,9 @@ class Semaphore:
         self.mark_scanning(i for i in targets if i in running)
 
         for img_id in targets:
-            self.state.forget(img_id)
-            self.state.save()  # don't hold the write lock through the SBOM generation
+            if img_id not in running:
+                self.state.forget(img_id)
+                self.state.save()  # don't hold the write lock through the SBOM generation
 
             for p in self.scanner.artifacts(img_id):
                 p.unlink(missing_ok=True)
@@ -249,7 +256,9 @@ class Semaphore:
             self.scan_running()
         elif kind == "rescan":
             log.info("Periodic rescan of all running images")
+
             started = time.time()
+
             self.status("updating vulnerability DB")
             self.scanner.ensure_db(force=True)
             self.scan_running(rescan=True)

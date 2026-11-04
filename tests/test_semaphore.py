@@ -368,6 +368,7 @@ def test_settings_override_env_and_bad_settings_are_ignored(tmp_path):
     env = Config(data_dir=tmp_path, apprise_urls="json://localhost/a")
 
     assert env.apply_settings(None) is env
+
     cfg = env.apply_settings(
         {
             "min_severity": "Critical",
@@ -383,6 +384,7 @@ def test_settings_override_env_and_bad_settings_are_ignored(tmp_path):
     assert len(list(a.notifier.find("urgent"))) == 1 and not any(
         a.notifier.find("normal")
     )
+
     # emptied in the TUI, no fallback to env
     assert env.apply_settings({"targets": []}).routes() == []
     assert env.apply_settings({"min_severity": "bogus"}) is env
@@ -416,7 +418,9 @@ def test_tui_saves_settings(tmp_path, monkeypatch):
             app.query_one("#schedule").value = "nope"
             await pilot.press("ctrl+s")
             await pilot.pause()
+
             assert State(tmp_path, readonly=True).settings is None  # bad cron
+
             app.query_one("#schedule").value = "0 3 * * 1"
             await pilot.press("ctrl+s")
             await pilot.pause()
@@ -440,10 +444,12 @@ def test_daemon_reloads_settings_when_tui_changes_them(tmp_path):
     tui = State(tmp_path)
 
     assert sem.alerter.notifier is None
+
     tui.settings = {
         "min_severity": "low",
         "targets": [{"url": "json://localhost/a", "tiers": ["normal"]}],
     }
+
     tui.save()
     sem.reload_settings()
     assert sem.config.min_severity == "low" and any(sem.alerter.notifier.find("normal"))
@@ -487,12 +493,15 @@ def test_bus_pushes_status_and_queues_tui_requests(sock):
         c.sendall(b'{"rescan": ["b"]}\n{"rescan": ["c"]}\n{"settings": true}\n')
         assert recv()["pending"] == ["b"]
         assert recv()["pending"] == ["b", "c"]
+
         # one discard for requests merged before it runs
         assert tasks.get(timeout=1) == ("discard",)
         assert tasks.get(timeout=1) == ("settings",)
+
         assert bus.take_pending() == ["b", "c"] and bus.status["pending"] == []
         c.sendall(b'{"rescan": null}\n')
         assert recv()["pending"] is None
+
         assert tasks.get(timeout=1) == ("discard",)
 
 
@@ -694,7 +703,6 @@ def test_rescan_request_discards_and_rescans_running_images(tmp_path):
     sbom.write_text("{}")
     sem.state.record_scan(IMG, "img:1", [], counts, found)
     sem.state.save()
-
     sem.bus.receive({"rescan": [IMG]})
     sem.handle(sem.tasks.get_nowait())
     assert IMG not in sem.state and not sbom.exists() and rescanned == []
@@ -702,6 +710,33 @@ def test_rescan_request_discards_and_rescans_running_images(tmp_path):
     sem.bus.receive({"rescan": None})  # all: stored and running images
     sem.handle(sem.tasks.get_nowait())
     assert IMG not in sem.state and rescanned == ["sha256:run"]
+
+    # a running image keeps its alert marks, only its SBOM goes
+    run_sbom = sem.scanner.artifact("sha256:run", "syft.json")
+
+    run_sbom.write_text("{}")
+    sem.state.record_scan("sha256:run", "web:1", ["web"], counts, found)
+
+    marks = sem.state.alerted("sha256:run")
+
+    sem.bus.receive({"rescan": ["sha256:run"]})
+    sem.handle(sem.tasks.get_nowait())
+    assert "sha256:run" in sem.state and sem.state.alerted("sha256:run") == marks
+    assert not run_sbom.exists() and rescanned == ["sha256:run"] * 2
+
+
+def test_identical_rescan_sends_no_alert(tmp_path):
+    from semaphore.app import Semaphore
+
+    sem = Semaphore(Config(data_dir=tmp_path))
+    found, counts, rest = parse_matches(SAMPLE, sem.config.min_rank, 0.1)
+    info = {"containers": {"web"}}
+
+    sem.commit((IMG, info, [], "img:1", True), (found, counts, rest, None))
+    assert [a.is_new_image for a in sem.alerter.pending] == [True]
+    sem.alerter.pending.clear()
+    sem.commit((IMG, info, [], "img:1", True), (found, counts, rest, None))
+    assert not sem.alerter.pending
 
 
 def test_scan_images_analyzes_in_parallel_and_commits_on_worker(tmp_path):
@@ -776,8 +811,8 @@ def test_tui_lists_images_and_requests_rescan_after_confirm(
         async with app.run_test() as pilot:
             await until(pilot, lambda: app.daemon is not None)
             assert str(app.query_one("#status").content) == "Idle"
-            assert tasks.get(timeout=1) == ("settings",)  # sent on connect
 
+            assert tasks.get(timeout=1) == ("settings",)  # sent on connect
             table = app.query_one("#image-table")
             row = table.get_row(IMG)
 
@@ -807,6 +842,7 @@ def test_tui_lists_images_and_requests_rescan_after_confirm(
             app.rescan_selected()
             await pilot.pause()
             await pilot.click("#yes")
+
             # spinner + yellow row until the daemon is done
             await until(pilot, lambda: app.scanning == {IMG})
             assert table.get_row(IMG)[1].endswith(" httpd:2.4.49")
@@ -877,7 +913,6 @@ def test_tui_keeps_discarded_row_until_its_new_scan_lands(tmp_path, monkeypatch,
             await until(pilot, lambda: app.daemon is not None)
             app.request_rescan([IMG])
             await until(pilot, lambda: IMG in app.scanning)
-
             bus.take_pending()  # what Semaphore.discard does, then mark_scanning + forget
             daemon.forget(IMG)
             daemon.save()
@@ -894,14 +929,12 @@ def test_tui_keeps_discarded_row_until_its_new_scan_lands(tmp_path, monkeypatch,
             assert table.get_row(IMG)[1].endswith("httpd:2.4.49")  # old row, spinning
             assert IMG in app.scanning
             assert str(status.content)[2:] == "httpd:2.4.49 · generating SBOM · 0s"
-
             daemon.record_scan(IMG, "httpd:2.4.49", ["web"], {}, {}, None)
             daemon.save()
             bus.publish(scanning=[], activity=None)
             await until(pilot, lambda: IMG not in app.scanning)
             assert table.get_row(IMG)[3] == "clean"  # new scan
             assert str(status.content) == "Idle"
-
             daemon.forget(IMG)  # gone for good once nothing scans it
             daemon.save()
             bus.publish()

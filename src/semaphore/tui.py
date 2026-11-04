@@ -422,8 +422,10 @@ class SemaphoreTUI(App):
         table.add_column("✓", key="sel")
         table.add_column("Image", key="name")
         table.add_columns("Scanned", "Findings", "Update", "After update")
+
         # kept: query_one looks in the active screen, a modal when a status push lands
         self.status_bar = self.query_one("#status", Static)
+
         self.show_images()
         self.show_status()
         self.show_last_batch()
@@ -530,6 +532,7 @@ class SemaphoreTUI(App):
             try:
                 with socket.socket(socket.AF_UNIX) as conn:
                     conn.connect(str(self.base.socket_path))
+
                     self.conn = conn
 
                     # settings saved while disconnected, a no-op when unchanged
@@ -546,6 +549,7 @@ class SemaphoreTUI(App):
                 return
 
             self.call_from_thread(self.on_daemon, None)
+
             # retries every 2 s only while the daemon is down
             self.closing.wait(2)
 
@@ -694,8 +698,8 @@ class SemaphoreTUI(App):
 
         self.push_screen(
             Confirm(
-                f"Discard the SBOMs, scan results and alert history of {what} and rescan from scratch?\n\n"
-                "Every current finding will be alerted again."
+                f"Discard the SBOMs and scan results of {what} and rescan from scratch?\n\n"
+                "Only new or escalated findings will be alerted."
             ),
             done,
         )
