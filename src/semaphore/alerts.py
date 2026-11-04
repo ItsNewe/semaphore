@@ -103,7 +103,13 @@ def merge(fs: list[Finding]) -> Finding:
 def importance(f: Finding) -> tuple:
     """Sort key, most important first: KEV, RCE, severity, EPSS"""
 
-    return -bool(f.kev), -(f.cls == "RCE"), -rank(f.severity), -(f.epss or 0), f.id or ""
+    return (
+        -bool(f.kev),
+        -(f.cls == "RCE"),
+        -rank(f.severity),
+        -(f.epss or 0),
+        f.id or "",
+    )
 
 
 def describe(f: Finding, escalated: bool, fixed: bool = False) -> str:

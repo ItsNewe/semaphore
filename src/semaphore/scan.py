@@ -45,6 +45,7 @@ RCE_TEXT = re.compile(
     r"|command injection|code injection",
     re.I,
 )
+DISPUTED_TEXT = re.compile(r"\*\*\s*DISPUTED\s*\*\*")  # NVD description prefix
 DOS_TEXT = re.compile(
     r"denial of service|infinite loop|resource exhaustion|\bcrash", re.I
 )
@@ -221,13 +222,19 @@ class Scanner:
 
 
 def parse_matches(
-    report: dict, min_rank: int, epss_threshold: float, skip_wont_fix: bool = True
+    report: dict,
+    min_rank: int,
+    epss_threshold: float,
+    skip_wont_fix: bool = True,
+    skip_disputed: bool = True,
+    skip_negligible: bool = True,
 ) -> tuple[dict[str, Finding], dict, dict[str, Finding]]:
     """Returns (alertable findings keyed by vuln|pkg|version, counts for all severities, the other findings)
 
     Alertable = at/above min_rank, or urgent at any severity: a known-exploited
     Medium matters more than an unexploited High. Findings the distro won't fix
-    (Debian no-dsa/ignored, fix state "wont-fix") are not alertable unless known-exploited or skip_wont_fix is off
+    (Debian no-dsa/ignored, fix state "wont-fix"), disputed CVEs and Negligible ones are not alertable
+    unless known-exploited or their skip_* flag is off
     """
 
     unique: dict = {}
@@ -245,6 +252,7 @@ def parse_matches(
 
     for key, (sev, m) in unique.items():
         v, a = m.get("vulnerability", {}), m.get("artifact", {})
+        related = m.get("relatedVulnerabilities") or []
         epss = max((e.get("epss") or 0.0 for e in v.get("epss") or []), default=None)
         f = Finding(
             id=v.get("id"),
@@ -255,19 +263,25 @@ def parse_matches(
             url=v.get("dataSource", ""),
             kev=bool(v.get("knownExploited")),
             epss=epss,
-            cls=exploit_class(v, m.get("relatedVulnerabilities") or []),
+            cls=exploit_class(v, related),
         )
 
         if f.kev or (epss is not None and epss >= epss_threshold) or f.cls == "RCE":
             f.tier = "urgent"
 
-        wont_fix = (
-            skip_wont_fix
-            and (v.get("fix") or {}).get("state") == "wont-fix"
-            and not f.kev
+        skipped = not f.kev and (
+            (skip_wont_fix and (v.get("fix") or {}).get("state") == "wont-fix")
+            or (skip_negligible and sev == "Negligible")
+            or (
+                skip_disputed
+                and any(
+                    DISPUTED_TEXT.search(e.get("description") or "")
+                    for e in (v, *related)
+                )
+            )
         )
         alertable = f.tier == "urgent" or rank(sev) >= min_rank
 
-        (found if alertable and not wont_fix else rest)[key] = f
+        (found if alertable and not skipped else rest)[key] = f
 
     return found, counts, rest

@@ -78,6 +78,31 @@ def test_wont_fix_dropped_unless_known_exploited():
     assert DOS in parse_matches(json.loads(RAW), 0, 0.1, skip_wont_fix=False)[0]
 
 
+def test_disputed_and_negligible_skipped_unless_known_exploited():
+    report = json.loads(RAW)
+    plain = next(
+        m for m in report["matches"] if m["vulnerability"]["id"] == "CVE-2021-39537"
+    )
+    plain["vulnerability"]["description"] = "** DISPUTED ** Some bug"
+    report["matches"][1]["vulnerability"]["fix"]["state"] = ""
+    report["matches"][1]["vulnerability"]["severity"] = (
+        "Negligible"  # DOS, urgent by EPSS
+    )
+
+    found, _, rest = parse_matches(report, 0, 0.1)
+
+    assert PLAIN in rest and DOS in rest and KEV in found
+
+    found, *_ = parse_matches(
+        report, 0, 0.1, skip_disputed=False, skip_negligible=False
+    )
+
+    assert {PLAIN, DOS} <= found.keys()
+
+    report["matches"][0]["vulnerability"]["severity"] = "Negligible"  # KEV still alerts
+    assert KEV in parse_matches(report, 0, 0.1)[0]
+
+
 def test_exploit_class_rce_needs_no_privileges():
     v = {"cwes": [{"cwe": "CWE-77"}]}
 

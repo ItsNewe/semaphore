@@ -196,6 +196,8 @@ class UpdateChecker:
                         self.config.min_rank,
                         self.config.epss_threshold,
                         self.config.skip_wont_fix,
+                        self.config.skip_disputed,
+                        self.config.skip_negligible,
                     )[1],
                 }
 

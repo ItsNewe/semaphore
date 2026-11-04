@@ -83,6 +83,8 @@ class Semaphore:
             self.config.min_rank,
             self.config.epss_threshold,
             self.config.skip_wont_fix,
+            self.config.skip_disputed,
+            self.config.skip_negligible,
         )
         update = None
 
@@ -317,11 +319,13 @@ class Semaphore:
 
         log.info(
             "semaphore starting: min severity=%s, urgent at EPSS>=%s/KEV/RCE, only fixed=%s, "
-            "skip won't-fix=%s, rescan every %.0fh, pull events=%s",
+            "skip won't-fix=%s disputed=%s negligible=%s, rescan every %.0fh, pull events=%s",
             cfg.min_severity,
             cfg.epss_threshold,
             cfg.only_fixed,
             cfg.skip_wont_fix,
+            cfg.skip_disputed,
+            cfg.skip_negligible,
             cfg.rescan_interval / 3600,
             cfg.scan_on_pull,
         )

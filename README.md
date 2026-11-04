@@ -25,6 +25,8 @@ SBOMs are keyed by image ID so restarts and redeploys of the same image are noop
 | `EPSS_THRESHOLD` | `0.1` | EPSS score (0–1) at which a finding becomes urgent |
 | `ONLY_FIXED` | `false` | Only alert when an upstream fix exists |
 | `SKIP_WONT_FIX` | `true` | Skip findings the distro marks won't-fix (Debian no-dsa/ignored), unless in CISA KEV |
+| `SKIP_DISPUTED` | `true` | Skip CVEs whose NVD description is marked `** DISPUTED **`, unless in CISA KEV |
+| `SKIP_NEGLIGIBLE` | `true` | Skip findings of `Negligible` severity, even urgent ones, unless in CISA KEV |
 | `RESCAN_INTERVAL_HOURS` | `24` | Re-match SBOMs against a fresh DB |
 | `SCAN_ON_PULL` | `false` | Also react to `image pull` events |
 | `EXCLUDE_IMAGES` | – | Regex to filter image names |
@@ -56,7 +58,8 @@ Critical: 1 | High: 2 | RCE: 1 | KEV: 1
 ```
 
 Findings the distro won't fix (Debian `no-dsa`/`ignored`, Grype fix state `wont-fix`) are not alerted unless they are
-in KEV. Set `SKIP_WONT_FIX=false` to alert on them too.
+in KEV. Set `SKIP_WONT_FIX=false` to alert on them too. Disputed CVEs (`SKIP_DISPUTED`) and `Negligible`
+ones (`SKIP_NEGLIGIBLE`) are handled the same way. Skipped findings still show, grayed, in the TUI's CVE list.
 
 Urgent messages use Apprise's `failure` type and a `🔴 URGENT` title. A finding already reported as normal is reported
 again once it becomes urgent, for example when it gets added to KEV.
