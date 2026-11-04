@@ -19,6 +19,13 @@ from pathlib import Path
 from .scan import TIER_RANK, Finding
 from .util import now_iso, worst
 
+
+def row_order(r: dict) -> tuple:
+    """Sort key of State.rows: most severe first, then by name"""
+
+    return -worst(s for s, n in (r["counts"] or {}).items() if n), r["name"] or ""
+
+
 log = logging.getLogger("semaphore")
 FINDING_COLS = [f.name for f in fields(Finding)]
 SCHEMA = f"""
@@ -191,12 +198,7 @@ class State:
             )
         ]
 
-        rows.sort(
-            key=lambda r: (
-                -worst(s for s, n in (r["counts"] or {}).items() if n),
-                r["name"] or "",
-            )
-        )
+        rows.sort(key=row_order)
 
         return rows
 

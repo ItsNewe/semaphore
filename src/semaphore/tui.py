@@ -44,13 +44,14 @@ from textual.widgets import (
 from .alerts import TIERS, Alerter, ImageAlert, importance
 from .config import SEV_RANK, Config
 from .scan import Finding
-from .store import State
+from .store import State, row_order
 from .util import plural, rank
 
 SEVERITIES = list(reversed(SEV_RANK))  # critical first
 RELOAD = "reload"  # App.run() result asking main() to restart with fresh code
 FRAMES = Spinner("dots").frames
 SCANNING = Style(color="black", bgcolor="yellow")
+SCANNING_CURSOR = Style(color="black", bgcolor="bright_yellow", bold=True)
 
 
 def mtime(path: Path) -> float | None:
@@ -248,6 +249,29 @@ class ImageTable(DataTable):
 
         return style
 
+    def _render_cell(
+        self, row_index, column_index, base_style, width, cursor=False, hover=False
+    ):
+        """Keeps a scanning row yellow under the cursor, which would paint over it"""
+
+        if (
+            cursor
+            and row_index >= 0
+            and self.ordered_rows[row_index].key.value in self.app.scanning
+        ):
+            return super()._render_cell(
+                row_index,
+                column_index,
+                base_style + SCANNING_CURSOR,
+                width,
+                False,
+                hover,
+            )
+
+        return super()._render_cell(
+            row_index, column_index, base_style, width, cursor, hover
+        )
+
 
 class SemaphoreTUI(App):
     TITLE = "sémaphore"
@@ -286,6 +310,7 @@ class SemaphoreTUI(App):
         self.selected: set[str] = set()  # image ids ticked in the Images tab
         self.scanning: set[str] = set()  # image ids the daemon is scanning or asked to
         self.names: dict[str, str] = {}  # image id -> name shown in the Images tab
+        self.rows: list[dict] = []  # rows shown in the Images tab
         self.db_stamp: tuple | None = None
         self.frame = 0
 
@@ -513,9 +538,19 @@ class SemaphoreTUI(App):
         state = State(self.base.data_dir, readonly=True)
         rows = state.rows()
         pending = (state.rescan_request or {"images": []})["images"]
-        self.selected &= {r["id"] for r in rows}
+        scanning = {*state.scanning, *(pending or ())}
+        in_db = {r["id"] for r in rows}
+        # a discarded image leaves the DB until its new scan lands: keep showing its old row meanwhile
+        rows += [
+            r
+            for r in self.rows
+            if r["id"] not in in_db and (pending is None or r["id"] in scanning)
+        ]
+        rows.sort(key=row_order)
+        self.rows = rows
         self.names = {r["id"]: r["name"] or r["id"] for r in rows}
-        self.scanning = {*state.scanning, *(self.names if pending is None else pending)}
+        self.selected &= self.names.keys()
+        self.scanning = scanning | (self.names.keys() if pending is None else set())
         cursor = (
             table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             if table.row_count

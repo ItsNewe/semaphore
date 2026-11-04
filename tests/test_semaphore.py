@@ -726,3 +726,51 @@ def test_next_rescan_follows_cron_in_local_time():
 
     with pytest.raises(SystemExit):
         Config(rescan_schedule="nope")
+
+
+def test_tui_keeps_discarded_row_until_its_new_scan_lands(tmp_path, monkeypatch):
+    import asyncio
+
+    from semaphore.tui import SemaphoreTUI
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    found, counts = parse()
+    daemon = State(tmp_path)
+
+    daemon.record_scan(IMG, "httpd:2.4.49", ["web"], counts, found, None)
+    daemon.save()
+
+    async def run():
+        app = SemaphoreTUI()
+
+        async with app.run_test() as pilot:
+            table = app.query_one("#image-table")
+
+            async def refresh():
+                app.poll()
+                await pilot.pause()
+
+            await refresh()
+            app.request_rescan([IMG])
+            daemon.take_rescan()  # what Semaphore.discard does
+            daemon.scanning = [IMG]
+            daemon.forget(IMG)
+            daemon.save()
+            await refresh()
+            assert table.get_row(IMG)[1].endswith("httpd:2.4.49")  # old row, spinning
+            assert IMG in app.scanning
+
+            daemon.record_scan(IMG, "httpd:2.4.49", ["web"], {}, {}, None)
+            daemon.scanning = []
+            daemon.save()
+            await refresh()
+            assert table.get_row(IMG)[3] == "clean"  # new scan
+            assert IMG not in app.scanning
+
+            daemon.forget(IMG)  # gone for good once nothing scans it
+            daemon.save()
+            await refresh()
+            assert table.row_count == 0
+
+    asyncio.run(run())
