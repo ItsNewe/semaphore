@@ -1,7 +1,10 @@
+
 # Sémaphore
 
 Generates an SBOM with **[Syft](https://github.com/anchore/syft)** for every running Docker image, matches it against
 the **[Grype](https://github.com/anchore/grype)** vulnerability DB and alerts through **[Apprise](https://github.com/caronc/apprise)**
+
+[demo.webm](https://github.com/user-attachments/assets/65522b9d-5ea1-4c85-93d4-c7e3aa9b593d)
 
 ## Behavior
 
