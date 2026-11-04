@@ -4,7 +4,7 @@ for every image that is actually running on this Docker host
 
   container `start` event (optionally image `pull`)  -> unseen image? -> SBOM + scan
   every RECONCILE_INTERVAL_SECONDS                    -> catch anything the event stream missed
-  every RESCAN_INTERVAL_HOURS                         -> refresh Grype DB, re-match stored SBOMs
+  on RESCAN_SCHEDULE (cron)                           -> refresh Grype DB, re-match stored SBOMs
   rescan request stored in semaphore.db by the TUI     -> discard scans + alert marks, rescan as new
 
 Vulnerable images also get an update check on each scan: is the same tag rebuilt upstream, or is there
@@ -52,9 +52,7 @@ class Semaphore:
         self.updates = UpdateChecker(config, self.scanner)
         self.alerter = Alerter(self.config)
         self.tasks: queue.Queue[tuple] = queue.Queue()
-        self.scanning: set[str] = (
-            set()
-        )  # mirrors State.scanning for the TUI spinners
+        self.scanning: set[str] = set()  # mirrors State.scanning for the TUI spinners
         self.host: DockerHost | None = (
             None  # created in run(), used by the worker thread only
         )
@@ -197,15 +195,16 @@ class Semaphore:
             self.scan_running()
         elif kind == "rescan":
             log.info("Periodic rescan of all running images")
+            started = time.time()
             self.scanner.ensure_db(force=True)
             self.scan_running(rescan=True)
 
             if self.config.prune_removed:
                 self.prune()
 
-            self.updates.prune()
+            self.updates.prune(self.state.last_rescan)
 
-            self.state.last_rescan = time.time()
+            self.state.last_rescan = started
         elif kind == "discard":
             self.discard(task[1])
         elif kind == "image":
@@ -256,9 +255,11 @@ class Semaphore:
 
         self.alerter.configure(self.config)
         log.info(
-            "Settings reloaded: min severity=%s, urgent at EPSS>=%s, %d notification target(s)",
+            "Settings reloaded: min severity=%s, urgent at EPSS>=%s, rescan schedule '%s', "
+            "%d notification target(s)",
             self.config.min_severity,
             self.config.epss_threshold,
+            self.config.rescan_schedule,
             len(self.config.routes()),
         )
 
@@ -319,16 +320,16 @@ class Semaphore:
     def scheduler(self, last_rescan: float) -> None:
         """Queues a reconcile every reconcile_interval and a rescan when one is due
         The rescan check runs before the first sleep, so an overdue rescan starts right away
-        last_rescan is passed in: the State connection belongs to the worker thread"""
-
-        next_rescan = last_rescan + self.config.rescan_interval
+        last_rescan is passed in: the State connection belongs to the worker thread
+        The due time is recomputed each loop, so a schedule changed in the TUI applies without restart"""
 
         while True:
-            if time.time() >= next_rescan:
+            if time.time() >= self.config.next_rescan(last_rescan):
                 self.tasks.put(("rescan",))
 
-                next_rescan = time.time() + self.config.rescan_interval
+                last_rescan = time.time()
 
+            # checked every reconcile_interval, so a rescan starts up to that late
             time.sleep(self.config.reconcile_interval)
             self.tasks.put(("reconcile",))
 
@@ -342,14 +343,15 @@ class Semaphore:
 
         log.info(
             "semaphore starting: min severity=%s, urgent at EPSS>=%s/KEV/RCE, only fixed=%s, "
-            "skip won't-fix=%s disputed=%s negligible=%s, rescan every %.0fh, pull events=%s",
+            "skip won't-fix=%s disputed=%s negligible=%s, rescan schedule '%s' (next %s), pull events=%s",
             cfg.min_severity,
             cfg.epss_threshold,
             cfg.only_fixed,
             cfg.skip_wont_fix,
             cfg.skip_disputed,
             cfg.skip_negligible,
-            cfg.rescan_interval / 3600,
+            cfg.rescan_schedule,
+            time.ctime(cfg.next_rescan(time.time())),
             cfg.scan_on_pull,
         )
 

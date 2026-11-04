@@ -5,6 +5,7 @@ description = "SBOM + vulnerability scanning of running Docker images, with tier
 requires-python = ">=3.12"
 dependencies = [
     "apprise>=1.9",
+    "cronsim>=2.7",
     "docker>=7.1",
     "textual>=8.2.8",
 ]

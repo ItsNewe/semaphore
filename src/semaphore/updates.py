@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import time
 
 from .config import Config
 from .scan import Finding, Scanner, parse_matches
@@ -203,11 +202,9 @@ class UpdateChecker:
 
         return best
 
-    def prune(self) -> None:
-        """Deletes candidate SBOMs not used by the last two rescans"""
-
-        cutoff = time.time() - 2 * self.config.rescan_interval
+    def prune(self, since: float) -> None:
+        """Deletes candidate SBOMs not used since the previous rescan started, i.e. by the last two rescans"""
 
         for p in self.config.sbom_dir.glob("upd-*.syft.json"):
-            if p.stat().st_mtime < cutoff:
+            if p.stat().st_mtime < since:
                 p.unlink(missing_ok=True)

@@ -27,7 +27,7 @@ SBOMs are keyed by image ID so restarts and redeploys of the same image are noop
 | `SKIP_WONT_FIX` | `true` | Skip findings the distro marks won't-fix (Debian no-dsa/ignored), unless in CISA KEV |
 | `SKIP_DISPUTED` | `true` | Skip CVEs whose NVD description is marked `** DISPUTED **`, unless in CISA KEV |
 | `SKIP_NEGLIGIBLE` | `true` | Skip findings of `Negligible` severity, even urgent ones, unless in CISA KEV |
-| `RESCAN_INTERVAL_HOURS` | `24` | Re-match SBOMs against a fresh DB |
+| `RESCAN_SCHEDULE` | `0 0 * * *` | Cron expression (5 fields, local time per `TZ`) to re-match SBOMs against a fresh DB |
 | `SCAN_ON_PULL` | `false` | Also react to `image pull` events |
 | `EXCLUDE_IMAGES` | – | Regex to filter image names |
 | `ALERT_MAX_LINES_PER_IMAGE` | `5` | CVE lines listed per image in an alert, most important first (KEV, RCE, severity, EPSS) |
@@ -89,7 +89,7 @@ and point `DOCKER_CONFIG` at its directory. crane and syft both read it.
 docker exec -it semaphore semaphore-tui
 ```
 
-- **Tiers**: `MIN_SEVERITY` and `EPSS_THRESHOLD`
+- **Settings**: `MIN_SEVERITY`, `EPSS_THRESHOLD` and `RESCAN_SCHEDULE`
 - **Targets**: Apprise URLs and which tiers (urgent, normal) each one receives
 - **Resend**: re-sends the latest notification batch to the saved targets
 - **Images**: every scanned image with its scan time, counts (`C:2 | H:5`), fixing update and counts once applied.

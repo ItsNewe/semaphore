@@ -1,5 +1,8 @@
 import json
+from datetime import datetime
 from pathlib import Path
+
+import pytest
 
 from semaphore.alerts import Alerter, ImageAlert
 from semaphore.config import Config
@@ -355,6 +358,10 @@ def test_settings_override_env_and_bad_settings_are_ignored(tmp_path):
     # emptied in the TUI, no fallback to env
     assert env.apply_settings({"targets": []}).routes() == []
     assert env.apply_settings({"min_severity": "bogus"}) is env
+    assert env.apply_settings({"rescan_schedule": "bogus"}) is env
+    assert env.apply_settings({"rescan_schedule": "*/5 * * * *"}).rescan_schedule == (
+        "*/5 * * * *"
+    )
 
 
 def test_legacy_settings_file_is_imported_once(tmp_path):
@@ -378,6 +385,11 @@ def test_tui_saves_settings(tmp_path, monkeypatch):
         async with app.run_test() as pilot:
             assert len(app.query(TargetRow)) == 1  # pre-filled from env
             app.query_one("#epss").value = "0.3"
+            app.query_one("#schedule").value = "nope"
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+            assert State(tmp_path, readonly=True).settings is None  # bad cron
+            app.query_one("#schedule").value = "0 3 * * 1"
             await pilot.press("ctrl+s")
             await pilot.pause()
 
@@ -388,6 +400,7 @@ def test_tui_saves_settings(tmp_path, monkeypatch):
     assert saved == {
         "min_severity": "high",
         "epss_threshold": 0.3,
+        "rescan_schedule": "0 3 * * 1",
         "targets": [{"url": "json://localhost/a", "tiers": ["urgent", "normal"]}],
     }
 
@@ -699,3 +712,17 @@ def test_tui_lists_images_and_requests_rescan_after_confirm(tmp_path, monkeypatc
 
     asyncio.run(run())
     assert State(tmp_path, readonly=True).rescan_request == {"images": [IMG]}
+
+
+def test_next_rescan_follows_cron_in_local_time():
+    cfg = Config()  # default: daily at midnight
+    after = datetime(2026, 1, 1, 15, 0).timestamp()
+
+    assert cfg.next_rescan(after) == datetime(2026, 1, 2).timestamp()
+    assert (
+        Config(rescan_schedule="30 */6 * * *").next_rescan(after)
+        == datetime(2026, 1, 1, 18, 30).timestamp()
+    )
+
+    with pytest.raises(SystemExit):
+        Config(rescan_schedule="nope")

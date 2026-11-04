@@ -1,4 +1,4 @@
-"""Terminal UI to edit settings (tier rules and Apprise targets), list scanned images, request rescans,
+"""Terminal UI to edit settings (tier rules, rescan schedule and Apprise targets), list scanned images, request rescans,
 re-send the last batch and send test alerts
 
 
@@ -293,7 +293,7 @@ class SemaphoreTUI(App):
         yield Header()
 
         with TabbedContent():
-            with TabPane("Tiers", id="tiers"):
+            with TabPane("Settings", id="tiers"):
                 with Horizontal(classes="setting"):
                     yield Label("Minimum severity for normal alerts")
                     yield Dropdown(
@@ -310,6 +310,12 @@ class SemaphoreTUI(App):
                     yield Input(
                         str(self.config.epss_threshold), type="number", id="epss"
                     )
+
+                with Horizontal(classes="setting"):
+                    yield Label(
+                        "Rescan schedule: cron expression in the daemon's local time (TZ)"
+                    )
+                    yield Input(self.config.rescan_schedule, id="schedule")
 
                 yield Button("Save", variant="primary", classes="save")
 
@@ -422,6 +428,15 @@ class SemaphoreTUI(App):
 
             return
 
+        schedule = self.query_one("#schedule", Input).value.strip()
+
+        try:
+            Config(rescan_schedule=schedule)
+        except SystemExit as e:
+            self.notify(str(e), severity="error")
+
+            return
+
         targets = []
 
         for url, tiers in (row.value() for row in self.query(TargetRow)):
@@ -443,6 +458,7 @@ class SemaphoreTUI(App):
         settings = {
             "min_severity": self.query_one("#min-severity", Select).value,
             "epss_threshold": epss,
+            "rescan_schedule": schedule,
             "targets": targets,
         }
 
@@ -458,7 +474,9 @@ class SemaphoreTUI(App):
 
         self.config = self.base.apply_settings(settings)
 
-        self.notify("Settings saved")
+        self.notify(
+            f"Settings saved, next rescan {time.ctime(self.config.next_rescan(time.time()))}"
+        )
 
     # ------------------------------------------------------------ images
 

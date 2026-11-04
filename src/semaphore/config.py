@@ -6,7 +6,10 @@ import logging
 import os
 import re
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
+
+from cronsim import CronSim, CronSimError
 
 log = logging.getLogger("semaphore")
 SEV_RANK = {
@@ -46,7 +49,7 @@ class Config:
     notify_on_start: bool = False
     prune_removed: bool = True
     check_updates: bool = True
-    rescan_interval: float = 24 * 3600
+    rescan_schedule: str = "0 0 * * *"
     reconcile_interval: int = 300
     db_update_interval: float = 6 * 3600
     max_lines: int = 5
@@ -65,6 +68,13 @@ class Config:
         if self.min_severity not in SEV_RANK:
             raise SystemExit(f"MIN_SEVERITY must be one of: {', '.join(SEV_RANK)}")
 
+        try:
+            CronSim(self.rescan_schedule, datetime.now())
+        except CronSimError as e:
+            raise SystemExit(
+                f"Rescan schedule {self.rescan_schedule!r} is not a cron expression: {e}"
+            ) from e
+
     @property
     def min_rank(self) -> int:
         return SEV_RANK[self.min_severity]
@@ -77,6 +87,13 @@ class Config:
     def report_dir(self) -> Path:
         return self.data_dir / "reports"
 
+    def next_rescan(self, after: float) -> float:
+        """Next scheduled rescan after a timestamp, in local time (TZ)"""
+
+        return next(
+            CronSim(self.rescan_schedule, datetime.fromtimestamp(after))
+        ).timestamp()
+
     def apply_settings(self, s: dict | None) -> Config:
         """This config overridden by the TUI settings (State.settings). None or unusable = no override"""
 
@@ -88,6 +105,9 @@ class Config:
                 self,
                 min_severity=str(s.get("min_severity", self.min_severity)).lower(),
                 epss_threshold=float(s.get("epss_threshold", self.epss_threshold)),
+                rescan_schedule=str(
+                    s.get("rescan_schedule", self.rescan_schedule)
+                ).strip(),
                 targets=(
                     tuple((t["url"], tuple(t["tiers"])) for t in s["targets"])
                     if "targets" in s
@@ -145,7 +165,7 @@ class Config:
             notify_on_start=env_bool("NOTIFY_ON_START"),
             prune_removed=env_bool("PRUNE_REMOVED_IMAGES", True),
             check_updates=env_bool("CHECK_UPDATES", True),
-            rescan_interval=env_hours("RESCAN_INTERVAL_HOURS", 24),
+            rescan_schedule=os.getenv("RESCAN_SCHEDULE", "0 0 * * *").strip(),
             reconcile_interval=int(os.getenv("RECONCILE_INTERVAL_SECONDS", "300")),
             db_update_interval=env_hours("DB_UPDATE_INTERVAL_HOURS", 6),
             max_lines=int(os.getenv("ALERT_MAX_LINES_PER_IMAGE", "5")),
