@@ -46,6 +46,7 @@ class Config:
     skip_disputed: bool = True
     skip_negligible: bool = True
     scan_on_pull: bool = False
+    only_running: bool = True  # hide images without a running container from the list
     notify_on_start: bool = False
     prune_removed: bool = True
     check_updates: bool = True
@@ -171,6 +172,7 @@ class Config:
             skip_disputed=env_bool("SKIP_DISPUTED", True),
             skip_negligible=env_bool("SKIP_NEGLIGIBLE", True),
             scan_on_pull=env_bool("SCAN_ON_PULL"),
+            only_running=env_bool("ONLY_RUNNING", True),
             notify_on_start=env_bool("NOTIFY_ON_START"),
             prune_removed=env_bool("PRUNE_REMOVED_IMAGES", True),
             check_updates=env_bool("CHECK_UPDATES", True),

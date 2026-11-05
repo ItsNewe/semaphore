@@ -74,11 +74,17 @@ class DockerHost:
             return False
 
     def events(self, types: list[str], events: list[str]):
-        """Yields (image_id, ref hint) for each matching event. Blocks; ends when the stream closes"""
+        """Yields (image_id, ref hint) for each matching event, (None, None) for a container destroy
+        (the container is gone and its image tag may point to a newer image by now). Blocks; ends when the stream closes"""
 
         for ev in self.client.events(
             decode=True, filters={"type": types, "event": events}
         ):
+            if ev.get("Action") == "destroy":
+                yield None, None
+
+                continue
+
             actor = ev.get("Actor") or {}
             ref = (actor.get("Attributes") or {}).get("image") or actor.get("ID")
 

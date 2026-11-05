@@ -31,6 +31,7 @@ services:
       ONLY_FIXED: ${ONLY_FIXED:-false}             # true = only alert when a fix exists
       RESCAN_SCHEDULE: ${RESCAN_SCHEDULE:-0 0 * * *}
       SCAN_ON_PULL: ${SCAN_ON_PULL:-false}         # also scan images pulled but not started
+      ONLY_RUNNING: ${ONLY_RUNNING:-true}          # hide images no longer running from the list
       SCAN_WORKERS: ${SCAN_WORKERS:-2}             # images scanned in parallel (~CPU cores)
       EXCLUDE_IMAGES: ${EXCLUDE_IMAGES:-}          # regex
       NOTIFY_ON_START: ${NOTIFY_ON_START:-false}   # send a message at startup

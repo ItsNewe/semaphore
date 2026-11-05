@@ -3,6 +3,7 @@
 daemon -> TUI: the status snapshot, on connect and on every change
   {"scanning": [ids], "pending": [ids] or null (= all), "activity": {stage, image, since, left} or null}
 TUI -> daemon: {"rescan": [ids] or null (= all)}, {"settings": true} once saved to semaphore.db
+A TUI connecting also queues hide_stopped, so it never lists images no longer running
 
 Socket threads never touch State: requests become worker tasks, like every other thread's
 """
@@ -40,6 +41,8 @@ class Bus:
                 with bus.lock:
                     bus.clients.add(self.request)
                     self.request.sendall(line(bus.status))
+
+                bus.tasks.put(("hide_stopped",))
 
                 try:
                     for raw in self.rfile:

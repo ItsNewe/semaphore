@@ -1,6 +1,6 @@
 """Persistent scan state in <data_dir>/semaphore.db (SQLite) and the human-readable summary.json
 
-Tables: images (latest scan per image), findings (every finding of that scan, alertable flag, highest tier
+Tables: images (latest scan per image, hidden once no container runs it), findings (every finding of that scan, alertable flag, highest tier
 alerted), scans (append-only log of every scan with the finding keys added and removed), meta (settings
 saved by the TUI, last rescan, last batch)
 
@@ -30,7 +30,8 @@ log = logging.getLogger("semaphore")
 FINDING_COLS = [f.name for f in fields(Finding)]
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS images (
-    id TEXT PRIMARY KEY, name TEXT, containers TEXT, last_scan TEXT, counts TEXT, update_info TEXT
+    id TEXT PRIMARY KEY, name TEXT, containers TEXT, last_scan TEXT, counts TEXT, update_info TEXT,
+    hidden INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS findings (
     image_id TEXT NOT NULL, key TEXT NOT NULL, {", ".join(FINDING_COLS)},
@@ -77,6 +78,13 @@ class State:
             }:  # DBs from before non-alertable findings were stored
                 self.db.execute(
                     "ALTER TABLE findings ADD COLUMN alertable INTEGER NOT NULL DEFAULT 1"
+                )
+
+            if "hidden" not in {
+                r[1] for r in self.db.execute("PRAGMA table_info(images)")
+            }:  # DBs from before stopped images were hidden
+                self.db.execute(
+                    "ALTER TABLE images ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0"
                 )
 
             self.import_legacy()
@@ -182,7 +190,7 @@ class State:
         return [r[0] for r in self.db.execute("SELECT id FROM images")]
 
     def rows(self) -> list[dict]:
-        """Every image, most severe first then by name"""
+        """Every image not hidden, most severe first then by name"""
 
         rows = [
             {
@@ -194,7 +202,7 @@ class State:
                 "update": json.loads(update),
             }
             for id_, name, containers, last_scan, counts, update in self.db.execute(
-                "SELECT id, name, containers, last_scan, counts, update_info FROM images"
+                "SELECT id, name, containers, last_scan, counts, update_info FROM images WHERE NOT hidden"
             )
         ]
 
@@ -203,8 +211,11 @@ class State:
         return rows
 
     def put_image(self, image_id, name, containers, last_scan, counts, update) -> None:
+        """Replacing the row also clears hidden: a scanned image is listed again"""
+
         self.db.execute(
-            "INSERT OR REPLACE INTO images VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO images (id, name, containers, last_scan, counts, update_info)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
             (
                 image_id,
                 name,
@@ -340,6 +351,24 @@ class State:
             "UPDATE findings SET alerted = ? WHERE image_id = ? AND key = ?",
             [(tier, image_id, k) for k, tier in previous.items()],
         )
+
+    def hidden(self, image_id: str) -> bool:
+        return bool(
+            self.db.execute(
+                "SELECT 1 FROM images WHERE id = ? AND hidden", (image_id,)
+            ).fetchone()
+        )
+
+    def hide(self, image_id: str) -> str | None:
+        """Takes an image off the list, keeping its alert marks for when it runs again
+        Returns its name, None if it was already hidden"""
+
+        row = self.db.execute(
+            "UPDATE images SET hidden = 1 WHERE id = ? AND NOT hidden RETURNING name",
+            (image_id,),
+        ).fetchone()
+
+        return row[0] if row else None
 
     def forget(self, image_id: str) -> str | None:
         """Drops an image's scan and alert marks (the scan log stays). Returns its name"""

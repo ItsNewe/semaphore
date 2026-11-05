@@ -6,6 +6,7 @@ for every image that is actually running on this Docker host
   every RECONCILE_INTERVAL_SECONDS                    -> catch anything the event stream missed
   on RESCAN_SCHEDULE (cron)                           -> refresh Grype DB, re-match stored SBOMs
   rescan request from the TUI (bus.py socket)         -> regenerate SBOMs + rescan, alert marks kept
+  container `destroy`, TUI connect, scheduled rescan  -> hide images no longer running (ONLY_RUNNING)
 
 Vulnerable images also get an update check on each scan: is the same tag rebuilt upstream, or is there
 a newer version tag, and which findings would it fix (updates.py)
@@ -80,8 +81,13 @@ class Semaphore:
 
         is_new = not self.scanner.has_sbom(image_id)
 
-        if not is_new and image_id in self.state and not rescan:
-            return None  # already scanned; the periodic rescan handles new CVEs
+        if (
+            not is_new
+            and image_id in self.state
+            and not self.state.hidden(image_id)
+            and not rescan
+        ):
+            return None  # already scanned; the periodic rescan handles new CVEs. Hidden: missed rescans
 
         return image_id, info, refs, name, is_new
 
@@ -221,6 +227,20 @@ class Semaphore:
             for p in self.scanner.artifacts(img_id):
                 p.unlink(missing_ok=True)
 
+    def hide_stopped(self) -> None:
+        """With ONLY_RUNNING, hides the stored images no container runs (pulled-only ones too)
+        Their SBOM and alert marks stay, so a restart re-matches without regenerating or re-alerting
+        (compose destroys the old container before starting the new one). prune deletes them with the image"""
+
+        if not self.config.only_running:
+            return
+
+        running = self.host.running_images()
+
+        for img_id in self.state.ids():
+            if img_id not in running and (name := self.state.hide(img_id)):
+                log.info("Image %s no longer running, hidden", name)
+
     def discard(self, ids: list[str] | None) -> None:
         """Deletes SBOMs and rescans the running images from scratch. Their alert marks stay, so only new or
         escalated findings alert. Stored images not running are forgotten. ids None = every image"""
@@ -261,6 +281,7 @@ class Semaphore:
 
             self.status("updating vulnerability DB")
             self.scanner.ensure_db(force=True)
+            self.hide_stopped()
             self.scan_running(rescan=True)
 
             if self.config.prune_removed:
@@ -269,6 +290,8 @@ class Semaphore:
             self.updates.prune(self.state.last_rescan)
 
             self.state.last_rescan = started
+        elif kind == "hide_stopped":
+            self.hide_stopped()
         elif kind == "discard":
             self.discard(self.bus.take_pending())
         elif kind == "settings":
@@ -376,6 +399,9 @@ class Semaphore:
             types.append("image")
             events.append("pull")
 
+        if self.config.only_running:
+            events.append("destroy")  # an image left without containers leaves the list
+
         while True:
             try:
                 host = (
@@ -383,12 +409,15 @@ class Semaphore:
                 )  # own client: docker-py clients are not shared across threads
 
                 log.info(
-                    "Listening for Docker events: %s",
-                    ", ".join(f"{t} {e}" for t, e in zip(types, events)),
+                    "Listening for Docker events: %s %s",
+                    "/".join(types),
+                    "/".join(events),
                 )
 
                 for img_id, ref in host.events(types, events):
-                    self.tasks.put(("image", img_id, ref))
+                    self.tasks.put(
+                        ("image", img_id, ref) if img_id else ("hide_stopped",)
+                    )
 
                 log.info("Event stream closed, reconnecting")
             except Exception as e:
@@ -420,7 +449,7 @@ class Semaphore:
 
         log.info(
             "semaphore starting: min severity=%s, urgent at EPSS>=%s/KEV/RCE, only fixed=%s, "
-            "skip won't-fix=%s disputed=%s negligible=%s, rescan schedule '%s' (next %s), pull events=%s",
+            "skip won't-fix=%s disputed=%s negligible=%s, rescan schedule '%s' (next %s), pull events=%s, only running=%s",
             cfg.min_severity,
             cfg.epss_threshold,
             cfg.only_fixed,
@@ -430,6 +459,7 @@ class Semaphore:
             cfg.rescan_schedule,
             time.ctime(cfg.next_rescan(time.time())),
             cfg.scan_on_pull,
+            cfg.only_running,
         )
 
         if self.alerter.notifier is None:

@@ -488,6 +488,7 @@ def test_bus_pushes_status_and_queues_tui_requests(sock):
             return json.loads(f.readline())
 
         assert recv() == {"scanning": [], "pending": [], "activity": None}
+        assert tasks.get(timeout=1) == ("hide_stopped",)
         bus.publish(scanning=["a"])
         assert recv()["scanning"] == ["a"]
         c.sendall(b'{"rescan": ["b"]}\n{"rescan": ["c"]}\n{"settings": true}\n')
@@ -725,6 +726,65 @@ def test_rescan_request_discards_and_rescans_running_images(tmp_path):
     assert not run_sbom.exists() and rescanned == ["sha256:run"] * 2
 
 
+def test_update_hides_old_version_and_keeps_its_alert_marks(tmp_path):
+    from semaphore.app import Semaphore
+
+    found, counts, rest = parse_matches(SAMPLE, Config().min_rank, 0.1)
+    running = {"sha256:b": {"containers": {"web"}, "refs": {"web:b"}}}
+
+    class Host:
+        def running_images(self):
+            return running
+
+        def candidate_refs(self, image_id, hints):
+            return list(hints)
+
+    for only in (False, True):
+        sem = Semaphore(Config(data_dir=tmp_path / str(only), only_running=only))
+        sem.host = Host()
+        sem.config.sbom_dir.mkdir(parents=True)
+
+        for img in (IMG, "sha256:b"):  # A was scanned and alerted, B replaced it
+            sem.commit((img, {}, [], img, True), (found, counts, rest, None))
+            sem.scanner.artifact(img, "syft.json").write_text("{}")
+
+        sem.alerter.pending.clear()
+        marks = sem.state.alerted(IMG)
+        sem.handle(("hide_stopped",))
+        listed = [r["id"] for r in sem.state.rows()]
+        assert listed == (["sha256:b"] if only else [IMG, "sha256:b"])
+        assert IMG in sem.state and sem.state.alerted(IMG) == marks
+
+    # A runs again (rollback, or compose starting it after destroying the old container): listed, not re-alerted
+    running[IMG] = {"containers": {"web"}, "refs": {"web:a"}}
+    job = sem.prepare(IMG, running[IMG], False)
+    assert job is not None
+    sem.commit(job, (found, counts, rest, None))
+    assert IMG in [r["id"] for r in sem.state.rows()] and not sem.alerter.pending
+
+
+def test_events_yield_start_image_and_destroy_marker():
+    from semaphore.host import DockerHost
+
+    class Containers:
+        def get(self, cid):
+            return type("C", (), {"attrs": {"Image": "sha256:new"}})()
+
+    class Client:
+        containers = Containers()
+
+        def events(self, **kw):
+            actor = {"ID": "c1", "Attributes": {"image": "web:2"}}
+
+            return [
+                {"Type": "container", "Action": "start", "Actor": actor},
+                {"Type": "container", "Action": "destroy", "Actor": actor},
+            ]
+
+    got = list(DockerHost(Client()).events(["container"], ["start", "destroy"]))
+    assert got == [("sha256:new", "web:2"), (None, None)]
+
+
 def test_identical_rescan_sends_no_alert(tmp_path):
     from semaphore.app import Semaphore
 
@@ -812,6 +872,7 @@ def test_tui_lists_images_and_requests_rescan_after_confirm(
             await until(pilot, lambda: app.daemon is not None)
             assert str(app.query_one("#status").content) == "Idle"
 
+            assert tasks.get(timeout=1) == ("hide_stopped",)  # queued on connect
             assert tasks.get(timeout=1) == ("settings",)  # sent on connect
             table = app.query_one("#image-table")
             row = table.get_row(IMG)
